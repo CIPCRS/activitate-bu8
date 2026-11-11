@@ -1,0 +1,56 @@
+rules_version = '2';
+// Pontaj TC — reguli de acces Firestore.
+// Fiecare cont de autentificare are un document accounts/{uid} cu: userId, role (admin | operator | team), active.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function accPath()  { return /databases/$(database)/documents/accounts/$(request.auth.uid); }
+    function hasAcc()   { return signedIn() && exists(accPath()) && get(accPath()).data.active == true; }
+    function role()     { return get(accPath()).data.role; }
+    function isAdmin()  { return hasAcc() && role() == 'admin'; }
+    function isMember() { return hasAcc() && (role() == 'admin' || role() == 'operator'); }
+    function myId()     { return get(accPath()).data.userId; }
+    function setupDone() { return exists(/databases/$(database)/documents/meta/public); }
+
+    // Marcajul "aplicația e configurată" + adresa contului de echipă (fără date personale)
+    match /meta/public {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    // Lista de nume: doar cine are codul echipei sau un cont activ
+    match /meta/roster {
+      allow read: if hasAcc();
+      allow write: if isAdmin();
+    }
+    // Activități configurabile + norma zilnică
+    match /meta/config {
+      allow read: if isMember();
+      allow write: if isAdmin();
+    }
+    // Conturi: doar adminul le creează/modifică. Excepție: primul admin, cât timp aplicația nu e configurată.
+    match /accounts/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow create: if isAdmin() || (signedIn() && request.auth.uid == uid && !setupDone());
+      allow update, delete: if isAdmin();
+    }
+    // Pontajul: un document pe om pe zi (days/{userId_AAAA-LL-ZZ}).
+    // Operatorul își vede doar zilele lui și poate doar ADĂUGA câte o apăsare; corecțiile le face adminul.
+    match /days/{dayId} {
+      allow get: if isAdmin() || (isMember() && (resource == null || resource.data.userId == myId()));
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        || (isMember() && request.resource.data.userId == myId() && dayId == myId() + '_' + request.resource.data.date);
+      allow update: if isAdmin()
+        || (isMember() && resource.data.userId == myId()
+            && request.resource.data.userId == resource.data.userId
+            && request.resource.data.date == resource.data.date
+            && request.resource.data.events.size() == resource.data.events.size() + 1);
+      allow delete: if isAdmin();
+    }
+    // Sincronizarea ceasului cu ora serverului
+    match /clock/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+  }
+}
