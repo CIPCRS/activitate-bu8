@@ -5,7 +5,7 @@
 /* ───────────── utilitare ───────────── */
 var TZ = 'Europe/Bucharest';
 var MAX_SHIFT_MS = 16 * 3600e3;          // o tură deschisă mai veche de 16h = "plecare lipsă"
-var APP_VERSION = '1.0.1';
+var APP_VERSION = '1.0.2';
 var $ = function (s, r) { return (r || document).querySelector(s); };
 var mem = {};
 var LS = {
@@ -22,17 +22,27 @@ function emsg(e) { return e && e.friendly ? e.message : (e && e.message ? e.mess
 var dfParts = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 function parts(ms) { var p = {}; dfParts.formatToParts(new Date(ms)).forEach(function (x) { p[x.type] = x.value; }); if (p.hour === '24') p.hour = '00'; return p; }
 function dateKey(ms) { var p = parts(ms); return p.year + '-' + p.month + '-' + p.day; }
-function fmtTime(ms) { if (ms == null) return '–'; var p = parts(ms); return p.hour + ':' + p.minute; }
+function fmtTime(ms) { if (ms == null) return '–'; var p = parts(ms); return p.hour + ':' + p.minute + ':' + p.second; }
+function fmtTimeM(ms) { if (ms == null) return '–'; var p = parts(ms); return p.hour + ':' + p.minute; }
 function addDays(dk, n) { var a = dk.split('-').map(Number); var d = new Date(Date.UTC(a[0], a[1] - 1, a[2] + n, 12)); return d.toISOString().slice(0, 10); }
 function zonedToMs(dk, hhmm) {
   var a = dk.split('-').map(Number), b = hhmm.split(':').map(Number);
-  var want = Date.UTC(a[0], a[1] - 1, a[2], b[0], b[1] || 0), guess = want;
-  for (var i = 0; i < 3; i++) { var p = parts(guess); var got = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute); guess -= (got - want); }
+  var want = Date.UTC(a[0], a[1] - 1, a[2], b[0], b[1] || 0, b[2] || 0), guess = want;
+  for (var i = 0; i < 3; i++) { var p = parts(guess); var got = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second); guess -= (got - want); }
   return guess;
 }
 var WD = ['dum', 'lun', 'mar', 'mie', 'joi', 'vin', 'sâm'];
 function fmtDate(dk, withWd) { var a = dk.split('-'); var s = a[2] + '.' + a[1] + '.' + a[0]; if (withWd) { s = WD[new Date(Date.UTC(+a[0], +a[1] - 1, +a[2], 12)).getUTCDay()] + ' ' + s; } return s; }
-function fmtDur(ms) { if (ms == null) return '–'; var m = Math.floor(Math.max(0, ms) / 60000); return Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0'); }
+function fmtDur(ms) { if (ms == null) return '–'; var s = Math.floor(Math.max(0, ms) / 1000); return Math.floor(s / 3600) + ':' + String(Math.floor(s % 3600 / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }
+// durată care curge: se actualizează pe loc în fiecare secundă (fără să redesenez butoanele)
+function live(base, since, norm) {
+  var v = base + (since ? now() - since : 0); if (norm != null) v = Math.max(0, v - norm);
+  return '<span data-lb="' + base + '" data-ls="' + (since || '') + '"' + (norm != null ? ' data-ln="' + norm + '"' : '') + '>' + fmtDur(v) + '</span>';
+}
+function liveParts(c, what) {   // [bază, de când curge] pentru totalul de prezență ('all') sau de picking ('pick')
+  var g = c.segs[c.segs.length - 1], tot = what === 'all' ? c.presence : c.pick;
+  return g && g.live && (what === 'all' || g.cat === what) ? [tot - g.dur, g.start] : [tot, 0];
+}
 function fmtClock(ms) { var s = Math.floor(Math.max(0, ms) / 1000); var h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'); }
 function initials(n) { return String(n || '?').trim().split(/\s+/).slice(0, 2).map(function (w) { return w[0] || ''; }).join('').toUpperCase(); }
 
@@ -142,9 +152,11 @@ function DemoStore() {
       var u = S.roster[userId];
       if (!u || S.pins[userId] !== pin) return Promise.reject(E('PIN greșit', 'pin'));
       if (!u.active) return Promise.reject(E('Cont dezactivat. Vorbește cu adminul.'));
+      LS.set('ptc_demo_me', userId);
       return Promise.resolve({ userId: userId, role: u.role, name: u.name });
     },
-    logout: function () { return Promise.resolve(); },
+    resume: function () { var id = LS.get('ptc_demo_me', null), u = id && S.roster[id]; return Promise.resolve(u && u.active !== false ? { userId: id, role: u.role, name: u.name } : null); },
+    logout: function () { LS.del('ptc_demo_me'); return Promise.resolve(); },
     changePin: function (userId, oldPin, newPin) { if (S.pins[userId] !== oldPin) return Promise.reject(E('PIN-ul vechi e greșit')); S.pins[userId] = newPin; save(); return Promise.resolve(); },
     config: function () { return Promise.resolve(clone(S.config)); },
     saveConfig: function (c) { S.config = clone(c); save(); return Promise.resolve(); },
@@ -265,6 +277,17 @@ function FirebaseStore(fbCfg) {
         return finishLogin(userId, pin, u);
       });
     },
+    // după refresh / redeschidere pe același dispozitiv: rămâne logat, fără PIN, cât timp contul e activ
+    resume: function () {
+      var me = LS.get('ptc_me', null), u = auth.currentUser;
+      if (!me || !u || u.email !== me.email) return Promise.resolve(null);
+      var ok = function () { loggedIn = true; return { userId: me.userId, role: me.role, name: me.name }; };
+      return db.doc('accounts/' + u.uid).get().then(function (a) {
+        if (!a.exists || !a.data().active || a.data().userId !== me.userId) return null;   // cont dezactivat sau PIN resetat → cere PIN
+        if (a.data().role !== me.role) { me.role = a.data().role; LS.set('ptc_me', me); }
+        return ok();
+      }, function (e) { return e && e.code === 'permission-denied' ? null : ok(); });   // fără semnal: merg pe ce e salvat pe telefon
+    },
     logout: function () { loggedIn = false; LS.del('ptc_me'); return auth.signOut().catch(function () {}); },
     changePin: function (userId, oldPin, newPin) {
       var u = auth.currentUser, cred = firebase.auth.EmailAuthProvider.credential(u.email, pinPass(oldPin));
@@ -373,9 +396,12 @@ function start() {
   store = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? FirebaseStore(window.FIREBASE_CONFIG) : DemoStore();
   store.boot().then(function (b) {
     if (!b.setupDone) { ui.screen = 'setup'; return render(); }
-    var me = LS.get('ptc_me', null);
-    if (me && store.mode === 'firebase') { ui.pinUser = { id: me.userId, name: me.name }; ui.screen = 'pin'; return render(); }
-    return showRoster();
+    return store.resume().catch(function () { return null; }).then(function (s) {
+      if (s) return enterSession(s);
+      var me = LS.get('ptc_me', null);
+      if (me && store.mode === 'firebase') { ui.pinUser = { id: me.userId, name: me.name }; ui.screen = 'pin'; return render(); }
+      return showRoster();
+    });
   }).catch(function (e) { console.error(e); ui.screen = 'fatal'; ui.err = emsg(e); render(); });
 }
 function showRoster(code) {
@@ -384,16 +410,18 @@ function showRoster(code) {
 }
 function doLogin(pin) {
   var u = ui.pinUser; ui.err = ''; ui.pin = pin; busy = true; renderPinDots('Se verifică…');
-  store.login(u.id, pin).then(function (s) {
-    session = s; ui.pin = '';
-    return Promise.all([store.config().catch(function () { return defaultConfig(); }), store.roster().catch(function () { return roster; })]);
-  }).then(function (a) {
+  store.login(u.id, pin).then(enterSession).catch(function (e) { busy = false; ui.pin = ''; ui.err = emsg(e); if (!e.friendly) console.error(e); render(); });
+}
+function enterSession(s) {
+  session = s; ui.pin = '';
+  return Promise.all([store.config().catch(function () { return defaultConfig(); }), store.roster().catch(function () { return roster; })]).then(function (a) {
     cfg = a[0] || defaultConfig(); if (!cfg.reasons) cfg.reasons = defaultConfig().reasons; if (!cfg.normMin) cfg.normMin = 510;
     roster = a[1] || roster;
+    if (roster[s.userId] && roster[s.userId].name) session.name = roster[s.userId].name;
     ui.screen = 'main'; ui.tab = isAdmin() ? 'azi' : 'pontaj'; busy = false;
     store.syncClock().then(function (o) { clockOffset = o; LS.set('ptc_offset', o); }).catch(function () {});
     enterTab(); render();
-  }).catch(function (e) { busy = false; ui.pin = ''; ui.err = emsg(e); if (!e.friendly) console.error(e); render(); });
+  });
 }
 function logout() {
   stopWatch(); session = null; sheet(null);
@@ -446,9 +474,9 @@ function summaryHtml(c) {
 function timelineHtml(c, withBy) {
   if (!c.segs.length) return '<div class="mut small">Nicio activitate.</div>';
   return '<ul class="tl">' + c.segs.map(function (g) {
-    return '<li><span class="dot ' + g.cat + '"></span><span class="tm">' + fmtTime(g.start) + ' – ' + (g.live ? 'acum' : fmtTime(g.end)) + '</span><span><b>' + esc(segLabel(g)) + '</b>' +
-      (g.c ? '<br><span class="small mut">' + esc(g.c) + '</span>' : '') + (withBy && g.by ? '<br><span class="small mut">corectat de ' + esc(g.by) + '</span>' : '') + '</span><span class="du">' + fmtDur(g.dur) + '</span></li>';
-  }).join('') + (c.departure ? '<li><span class="dot"></span><span class="tm">' + fmtTime(c.departure) + '</span><span><b>Plecare</b></span></li>' : '') +
+    return '<li><span class="dot ' + g.cat + '"></span><span class="tm" style="min-width:132px;font-size:13px">' + fmtTime(g.start) + ' – ' + (g.live ? 'acum' : fmtTime(g.end)) + '</span><span><b>' + esc(segLabel(g)) + '</b>' +
+      (g.c ? '<br><span class="small mut">' + esc(g.c) + '</span>' : '') + (withBy && g.by ? '<br><span class="small mut">corectat de ' + esc(g.by) + '</span>' : '') + '</span><span class="du">' + (g.live ? live(0, g.start) : fmtDur(g.dur)) + '</span></li>';
+  }).join('') + (c.departure ? '<li><span class="dot"></span><span class="tm" style="min-width:132px;font-size:13px">' + fmtTime(c.departure) + '</span><span><b>Plecare</b></span></li>' : '') +
     (c.missingOut ? '<li><span class="chip warn">Plecare nebifată</span></li>' : '') + '</ul>';
 }
 function viewPontaj() {
@@ -527,17 +555,17 @@ function viewAzi() {
   var n = now(), cnt = { pick: 0, brk: 0, other: 0, off: 0 }, order = { pick: 0, work: 1, break: 2, idle: 3, done: 4, none: 5 };
   var cards = people().filter(function (u) { return u.role !== 'admin' || adm.live.some(function (d) { return d.userId === u.id; }); }).map(function (u) {
     var L = liveFor(u.id), c = L.c, st = myState(c), key, chip;
-    if (st.k === 'pick') { key = 'pick'; chip = '<span class="chip pick">Picking ' + fmtDur(n - st.ev.t) + '</span>'; cnt.pick++; }
-    else if (st.k === 'r') { key = st.ev.rk === 'break' ? 'break' : 'work'; chip = '<span class="chip ' + key + '">' + esc(st.ev.rn) + ' ' + fmtDur(n - st.ev.t) + '</span>'; if (key === 'break') cnt.brk++; else cnt.other++; }
-    else if (st.k === 'idle') { key = 'idle'; chip = '<span class="chip">Fără activitate ' + fmtDur(n - st.ev.t) + '</span>'; cnt.other++; }
+    if (st.k === 'pick') { key = 'pick'; chip = '<span class="chip pick">Picking ' + live(0, st.ev.t) + '</span>'; cnt.pick++; }
+    else if (st.k === 'r') { key = st.ev.rk === 'break' ? 'break' : 'work'; chip = '<span class="chip ' + key + '">' + esc(st.ev.rn) + ' ' + live(0, st.ev.t) + '</span>'; if (key === 'break') cnt.brk++; else cnt.other++; }
+    else if (st.k === 'idle') { key = 'idle'; chip = '<span class="chip">Fără activitate ' + live(0, st.ev.t) + '</span>'; cnt.other++; }
     else if (c.departure) { key = 'done'; chip = '<span class="chip off">Plecat ' + fmtTime(c.departure) + '</span>'; cnt.off++; }
     else { key = 'none'; chip = '<span class="chip off">Nepontat</span>'; cnt.off++; }
     var html = '<button class="ucard" data-a="openDay" data-u="' + u.id + '" data-d="' + L.date + '"><span class="ava">' + esc(initials(u.name)) + '</span><span><span class="nm">' + esc(u.name) + '</span><br>' + chip +
       (L.stale ? ' <span class="chip warn">plecare lipsă ' + fmtDate(L.stale).slice(0, 5) + '</span>' : '') + (st.k === 'r' && st.ev.c ? '<br><span class="small mut">' + esc(st.ev.c) + '</span>' : '') + '</span>' +
-      '<span class="rt small">' + (c.arrival ? 'sosire <b>' + fmtTime(c.arrival) + '</b><br>picking <b>' + fmtDur(c.pick) + '</b>' + (overtime(c, cfg) ? '<br><span class="ot">supl. ' + fmtDur(overtime(c, cfg)) + '</span>' : '') : '') + '</span></button>';
+      '<span class="rt small">' + (c.arrival ? 'sosire <b>' + fmtTime(c.arrival) + '</b><br>picking <b>' + live(liveParts(c, 'pick')[0], liveParts(c, 'pick')[1]) + '</b>' + (overtime(c, cfg) ? '<br><span class="ot">supl. ' + live(liveParts(c, 'all')[0], liveParts(c, 'all')[1], (cfg.normMin || 510) * 60000) + '</span>' : '') : '') + '</span></button>';
     return { o: order[key], html: html, name: u.name };
   }).sort(function (a, b) { return a.o - b.o || a.name.localeCompare(b.name, 'ro'); });
-  return '<div class="card"><h3>Acum · ' + fmtDate(adm.key, true) + ' ' + fmtTime(n) + '</h3><div class="kv" style="grid-template-columns:repeat(4,1fr)"><div><b>' + cnt.pick + '</b><span>la picking</span></div><div><b>' + cnt.brk + '</b><span>în pauză</span></div><div><b>' + cnt.other + '</b><span>alte activități</span></div><div><b>' + cnt.off + '</b><span>plecați / nepontați</span></div></div></div>' +
+  return '<div class="card"><h3>Acum · ' + fmtDate(adm.key, true) + ' ' + fmtTimeM(n) + '</h3><div class="kv" style="grid-template-columns:repeat(4,1fr)"><div><b>' + cnt.pick + '</b><span>la picking</span></div><div><b>' + cnt.brk + '</b><span>în pauză</span></div><div><b>' + cnt.other + '</b><span>alte activități</span></div><div><b>' + cnt.off + '</b><span>plecați / nepontați</span></div></div></div>' +
     '<div class="livegrid">' + cards.map(function (c) { return c.html; }).join('') + '</div><div class="small mut center" style="margin-top:10px">Apasă pe un om ca să vezi ziua lui sau să corectezi pontajul.</div>';
 }
 
@@ -589,7 +617,7 @@ function renderEdit() {
   } else {
     h += '<div class="small mut" style="margin-bottom:8px">Fiecare rând pornește o stare care ține până la rândul următor. Rândurile modificate rămân marcate „corectat de ' + esc(session.name) + '”.</div>';
     h += ed.rows.map(function (r, i) {
-      return '<div class="evbox"><div class="evrow"><input class="in" type="time" value="' + r.time + '" data-ei="' + i + '" data-ef="time"><select class="in" data-ei="' + i + '" data-ef="type">' + typeOptions(r.type) + '</select><button data-a="evDel" data-i="' + i + '" aria-label="Șterge">🗑</button>' +
+      return '<div class="evbox"><div class="evrow"><input class="in" type="time" step="1" value="' + r.time + '" data-ei="' + i + '" data-ef="time"><select class="in" data-ei="' + i + '" data-ef="type">' + typeOptions(r.type) + '</select><button data-a="evDel" data-i="' + i + '" aria-label="Șterge">🗑</button>' +
         '<input class="in c2" placeholder="Comentariu" value="' + esc(r.c) + '" data-ei="' + i + '" data-ef="c"><label><input type="checkbox" data-ei="' + i + '" data-ef="next"' + (r.next ? ' checked' : '') + '>+1 zi</label></div></div>';
     }).join('') || '<div class="mut" style="margin:10px 0">Niciun rând.</div>';
     h += '<button class="btn ghost" data-a="evAdd">+ Adaugă rând</button><div class="err" id="ederr"></div><div class="row"><button class="btn green grow" data-a="evSave">Salvează</button><button class="btn ghost sm" style="min-height:56px" data-a="sheetClose">Renunță</button></div>';
@@ -671,17 +699,17 @@ function exportXlsx() {
       ws['!cols'] = aoa[0].map(function (hd, i) { return { wch: (widths && widths[i]) || Math.max(12, String(hd).length + 2) }; });
       return ws;
     }
-    var D = '[h]:mm', T = 'hh:mm', DT = 'dd.mm.yyyy';
+    var D = '[h]:mm:ss', T = 'hh:mm:ss', DT = 'dd.mm.yyyy';
     var s1 = [['Utilizator', 'ID WMS', 'Zile pontate', 'Prezență', 'Picking', 'Total pauze', 'Total alte activități'].concat(rc.map(function (r) { return r.name; })).concat(['Fără activitate', 'Ore suplimentare', 'Zile fără plecare bifată'])];
     users.forEach(function (u) { s1.push([u.name, u.wmsId, u.days, xlsDur(u.presence), xlsDur(u.pick), xlsDur(u.brk), xlsDur(u.other)].concat(rc.map(function (r) { return xlsDur(u.byReason[r.rid] || 0); })).concat([xlsDur(u.idle), xlsDur(u.ot), u.warn])); });
     var f1 = {}; for (var i = 3; i < s1[0].length - 1; i++) f1[i] = D;
     var s2 = [['Utilizator', 'ID WMS', 'Data', 'Sosire', 'Plecare', 'Prezență', 'Început picking', 'Picking'].concat(rc.map(function (r) { return r.name; })).concat(['Fără activitate', 'Ore suplimentare', 'Observații'])];
     days.forEach(function (d) { var c = d.c; s2.push([d.name, d.wmsId, xlsDate(d.date), xlsTime(c.arrival), xlsTime(c.departure), xlsDur(c.presence), xlsTime(c.firstPick), xlsDur(c.pick)].concat(rc.map(function (r) { return xlsDur((c.byReason[r.rid] || {}).ms || 0); })).concat([xlsDur(c.idle), xlsDur(d.ot), dayNote(c)])); });
     var f2 = { 2: DT, 3: T, 4: T, 5: D, 6: T }; for (i = 7; i < s2[0].length - 1; i++) f2[i] = D;
-    var s3 = [['Utilizator', 'ID WMS', 'Data', 'Început', 'Sfârșit', 'Durată', 'Minute', 'Activitate', 'Tip', 'Comentariu', 'Observații']];
-    days.forEach(function (d) { d.c.segs.forEach(function (g) { s3.push([d.name, d.wmsId, xlsDate(d.date), xlsTime(g.start), xlsTime(g.end), xlsDur(g.dur), Math.round(g.dur / 6000) / 10, segLabel(g), g.cat === 'pick' ? 'Picking' : g.cat === 'break' ? 'Pauză' : g.cat === 'work' ? 'Activitate' : 'Fără activitate', g.c || '', (g.live ? 'în curs' : '') + (g.by ? 'corectat de ' + g.by : '')]); }); });
+    var s3 = [['Utilizator', 'ID WMS', 'Data', 'Început', 'Sfârșit', 'Durată', 'Secunde', 'Activitate', 'Tip', 'Comentariu', 'Observații']];
+    days.forEach(function (d) { d.c.segs.forEach(function (g) { s3.push([d.name, d.wmsId, xlsDate(d.date), xlsTime(g.start), xlsTime(g.end), xlsDur(g.dur), Math.round(g.dur / 1000), segLabel(g), g.cat === 'pick' ? 'Picking' : g.cat === 'break' ? 'Pauză' : g.cat === 'work' ? 'Activitate' : 'Fără activitate', g.c || '', (g.live ? 'în curs' : '') + (g.by ? 'corectat de ' + g.by : '')]); }); });
     var s4 = [['ID WMS', 'Utilizator', 'Data', 'Ore picking (zecimal)', 'Ore prezență (zecimal)', 'Început picking']];
-    days.forEach(function (d) { s4.push([d.wmsId, d.name, xlsDate(d.date), Math.round(d.c.pick / 36000) / 100, Math.round(d.c.presence / 36000) / 100, xlsTime(d.c.firstPick)]); });
+    days.forEach(function (d) { s4.push([d.wmsId, d.name, xlsDate(d.date), Math.round(d.c.pick / 360) / 10000, Math.round(d.c.presence / 360) / 10000, xlsTime(d.c.firstPick)]); });
     var wb = X.utils.book_new();
     X.utils.book_append_sheet(wb, mk(s1, f1, [26, 12]), 'Sumar');
     X.utils.book_append_sheet(wb, mk(s2, f2, [26, 12, 12]), 'Zilnic');
@@ -729,7 +757,7 @@ function viewSetari() {
   var nm = cfg.normMin || 510;
   var h = '<div class="card"><h3>Ore suplimentare</h3><label class="f">Durata normală a unei zile (timpul contorizat de la sosire la plecare). Tot ce depășește această durată se calculează ca ore suplimentare.</label>' +
     '<div class="row"><input class="in" type="number" inputmode="numeric" id="snh" min="0" max="16" value="' + Math.floor(nm / 60) + '" style="width:76px"><span>ore</span><input class="in" type="number" inputmode="numeric" id="snm" min="0" max="59" value="' + (nm % 60) + '" style="width:76px"><span class="grow">minute</span><button class="btn navy sm" data-a="normSave">Salvează</button></div>' +
-    '<div class="small mut" style="margin-top:6px">Exemplu: la ' + Math.floor(nm / 60) + ' ore ' + (nm % 60) + ' min, cine stă ' + fmtDur((nm + 45) * 60000) + ' are 0:45 ore suplimentare.</div></div>';
+    '<div class="small mut" style="margin-top:6px">Exemplu: la ' + Math.floor(nm / 60) + ' ore ' + (nm % 60) + ' min, cine stă ' + fmtDur((nm + 45) * 60000) + ' are 0:45:00 ore suplimentare.</div></div>';
   h += '<div class="card"><h3>Activități / motive de pauză la picking</h3>' + (cfg.reasons || []).map(function (r, i) {
     return '<button class="ucard" style="box-shadow:none;border:1px solid var(--line)' + (r.active === false ? ';opacity:.55' : '') + '" data-a="reasonEdit" data-i="' + i + '"><span class="dot ' + r.kind + '" style="margin:0"></span><span><span class="nm">' + esc(r.name) + '</span><br><span class="small mut">' + KIND_LBL[r.kind] + ' · ' + CMT_LBL[r.comment || 'none'] + (r.active === false ? ' · ascuns' : '') + '</span></span><span class="rt mut">›</span></button>';
   }).join('') + '<button class="btn ghost" data-a="reasonEdit" data-i="-1">+ Activitate nouă</button></div>';
@@ -780,6 +808,10 @@ function enterTab() {
 }
 function tick() {
   if (ui.screen !== 'main') { var ck = $('#clock'); if (ck) ck.textContent = fmtTime(now()); return; }
+  var nn = now();
+  Array.prototype.forEach.call(document.querySelectorAll('[data-lb]'), function (el) {
+    var ls = Number(el.dataset.ls), v = Number(el.dataset.lb) + (ls ? nn - ls : 0); if (el.dataset.ln) v = Math.max(0, v - Number(el.dataset.ln)); el.textContent = fmtDur(v);
+  });
   if (ui.tab === 'pontaj' && my.loaded) {
     if (dateKey(now()) !== my.day[1]) { watchMine(); return; }
     var tm = $('#timer'); if (tm) tm.textContent = fmtClock(now() - Number(tm.dataset.since));
@@ -834,7 +866,7 @@ var actions = {
   },
   openDay: function (d) { openDay(d.u, d.d); },
   editMode: function () { ui.edit.mode = 'edit'; renderEdit(); },
-  evAdd: function () { var ed = ui.edit, last = ed.rows[ed.rows.length - 1]; ed.rows.push({ ev: null, time: last ? last.time : '07:00', time0: '', type: ed.rows.length ? 'out' : 'in', type0: '', c: '', c0: '', next: last ? last.next : false }); renderEdit(); },
+  evAdd: function () { var ed = ui.edit, last = ed.rows[ed.rows.length - 1]; ed.rows.push({ ev: null, time: last ? last.time : '07:00:00', time0: '', type: ed.rows.length ? 'out' : 'in', type0: '', c: '', c0: '', next: last ? last.next : false }); renderEdit(); },
   evDel: function (d) { ui.edit.rows.splice(+d.i, 1); renderEdit(); },
   evSave: function (d, el) {
     var ed = ui.edit, er = $('#ederr'); if (ed.rows.some(function (r) { return !/^\d\d:\d\d/.test(r.time); })) { er.textContent = 'Completează ora pe fiecare rând'; return; }
