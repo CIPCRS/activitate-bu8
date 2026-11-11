@@ -1,17 +1,32 @@
-/* Pontaj TC — pontaj + timpi de picking. Un singur fișier de logică; fără build. */
+/* Activitate (pontaj + timpi de picking). Un singur fișier de logică; fără build.
+   Numele afișat și proiectul Firebase vin din config.js — câte un config.js pentru fiecare depozit. */
 (function () {
 'use strict';
 
 /* ───────────── utilitare ───────────── */
 var TZ = 'Europe/Bucharest';
 var MAX_SHIFT_MS = 16 * 3600e3;          // o tură deschisă mai veche de 16h = "plecare lipsă"
-var APP_VERSION = '1.0.2';
 var $ = function (s, r) { return (r || document).querySelector(s); };
+var APP_VERSION = '1.3.0';
+var APP = window.APP_NAME || 'Activitate';
+var NS = (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.projectId) || 'demo';   // datele ținute pe telefon sunt separate pe fiecare depozit
+// Depozitele: o singură aplicație și o singură bază de date, împărțite pe depozite (lista vine din config.js)
+var SITES = (Array.isArray(window.APP_SITES) && window.APP_SITES.length ? window.APP_SITES : [{ id: 'main', name: 'Depozit' }]).map(function (x) { return { id: String(x.id), name: String(x.name || x.id) }; });
+var SITE0 = SITES[0].id;   // depozitul datelor dinainte de împărțirea pe depozite
+function siteName(id) { var x = SITES.filter(function (q) { return q.id === id; })[0]; return x ? x.name : (id || ''); }
+function siteOk(id) { return SITES.some(function (q) { return q.id === id; }); }
+function userSite(u) { return u && siteOk(u.site) ? u.site : SITE0; }
 var mem = {};
 var LS = {
-  get: function (k, d) { try { var v = localStorage.getItem(k); return v == null ? (k in mem ? mem[k] : d) : JSON.parse(v); } catch (e) { return k in mem ? mem[k] : d; } },
-  set: function (k, v) { mem[k] = v; try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
-  del: function (k) { delete mem[k]; try { localStorage.removeItem(k); } catch (e) {} }
+  get: function (k, d) {
+    try {
+      var v = localStorage.getItem(k + '@' + NS);
+      if (v == null && NS === 'pontaj-tc') v = localStorage.getItem(k);   // chei vechi, dinainte de v1.1
+      return v == null ? (k in mem ? mem[k] : d) : JSON.parse(v);
+    } catch (e) { return k in mem ? mem[k] : d; }
+  },
+  set: function (k, v) { mem[k] = v; try { localStorage.setItem(k + '@' + NS, JSON.stringify(v)); } catch (e) {} },
+  del: function (k) { delete mem[k]; try { localStorage.removeItem(k + '@' + NS); localStorage.removeItem(k); } catch (e) {} }
 };
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
 function rid(n) { var a = 'abcdefghjkmnpqrstuvwxyz23456789', s = ''; for (var i = 0; i < n; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
@@ -50,16 +65,17 @@ var clockOffset = Number(LS.get('ptc_offset', 0)) || 0;   // ora serverului − 
 function now() { return Date.now() + clockOffset; }
 
 /* ───────────── configurare implicită ───────────── */
-function defaultConfig() {
-  return {
-    normMin: 510,   // 08:30 prezență; ce trece = ore suplimentare
+function defaultConfig(site) {
+  var c = {
+    normMin: 510,   // 8 ore 30 min de prezență; ce trece = ore suplimentare
     reasons: [
       { id: 'r_pauza', name: 'Pauză oficială', kind: 'break', comment: 'none', active: true },
       { id: 'r_problema', name: 'Problemă comandă', kind: 'work', comment: 'req', active: true },
-      { id: 'r_lipsa', name: 'Lipsă raft', kind: 'work', comment: 'opt', active: true },
-      { id: 'r_batoane', name: 'Desfăcut batoane', kind: 'work', comment: 'none', active: true }
+      { id: 'r_lipsa', name: 'Lipsă raft', kind: 'work', comment: 'opt', active: true }
     ]
   };
+  if (!site || site === SITE0) c.reasons.push({ id: 'r_batoane', name: 'Desfăcut batoane', kind: 'work', comment: 'none', active: true });
+  return c;
 }
 var KIND_LBL = { break: 'Pauză (nu se lucrează)', work: 'Activitate (timp de lucru)' };
 var CMT_LBL = { none: 'fără comentariu', opt: 'comentariu opțional', req: 'comentariu obligatoriu' };
@@ -109,9 +125,13 @@ function seedDemo() {
   var seed = 7; function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
   function ri(a, b) { return a + Math.floor(rnd() * (b - a + 1)); }
   var cfg = defaultConfig();
-  var people = [['admin', 'Admin Demo', 'admin', '', '1234'], ['u1', 'Ionescu Maria', 'operator', 'R1010AAA', '1111'], ['u2', 'Popa Elena', 'operator', 'R1010BBB', '2222'], ['u3', 'Stan Cristina', 'operator', 'R1010CCC', '3333'], ['u4', 'Dobre Andrei', 'operator', 'R1010DDD', '4444']];
-  var S = { roster: {}, pins: {}, config: cfg, days: {} };
-  people.forEach(function (p) { S.roster[p[0]] = { name: p[1], role: p[2], wmsId: p[3], active: true }; S.pins[p[0]] = p[4]; });
+  var people = [['admin', 'Admin Demo', 'admin', '', '1234', ''], ['u1', 'Ionescu Maria', 'operator', 'R1010AAA', '1111', SITE0], ['u2', 'Popa Elena', 'operator', 'R1010BBB', '2222', SITE0], ['u3', 'Stan Cristina', 'operator', 'R1010CCC', '3333', SITE0], ['u4', 'Dobre Andrei', 'operator', 'R1010DDD', '4444', SITE0]];
+  if (SITES[1]) people.push(['v1', 'Radu Ioana', 'operator', '', '5555', SITES[1].id], ['v2', 'Matei Vlad', 'operator', '', '5555', SITES[1].id]);
+  if (SITES[2]) people.push(['w1', 'Sandu Ana', 'operator', '', '6666', SITES[2].id]);
+  if (SITES.length > 1) people.push(['sa', 'Șef ' + SITES[0].name + ' Demo', 'admin', '', '7777', SITE0, SITE0]);   // admin doar pe primul depozit
+  var S = { roster: {}, pins: {}, configs: {}, days: {} };
+  SITES.forEach(function (x) { S.configs[x.id] = defaultConfig(x.id); });
+  people.forEach(function (p) { S.roster[p[0]] = { name: p[1], role: p[2], wmsId: p[3], active: true }; if (p[5]) S.roster[p[0]].site = p[5]; if (p[6]) S.roster[p[0]].scope = p[6]; S.pins[p[0]] = p[4]; });
   var R = {}; cfg.reasons.forEach(function (r) { R[r.id] = r; });
   function ev(t, s, rid_, c, fp) { var e = { id: rid(8), t: t, d: t, s: s }; if (s === 'r') { e.rid = rid_; e.rn = R[rid_].name; e.rk = R[rid_].kind; if (fp) e.fp = true; } if (c) e.c = c; return e; }
   var M = 60000, today = dateKey(Date.now());
@@ -129,21 +149,23 @@ function seedDemo() {
       t += ri(50, 110) * M; evs.push(ev(t, 'idle'));
       var out = zonedToMs(dk, '15:30') + ri(-3, 6) * M + (rnd() < 0.3 ? ri(20, 75) * M : 0); if (out < t + 4 * M) out = t + ri(5, 12) * M;
       evs.push(ev(out, 'out'));
-      S.days[u + '_' + dk] = { userId: u, date: dk, events: evs };
+      S.days[u + '_' + dk] = { userId: u, date: dk, site: SITE0, events: evs };
     });
   }
   var n = Date.now();
-  S.days['u1_' + today] = { userId: 'u1', date: today, events: [ev(n - 172 * M, 'in'), ev(n - 160 * M, 'pick'), ev(n - 75 * M, 'r', 'r_problema', cmts[0], true), ev(n - 63 * M, 'pick')] };
-  S.days['u2_' + today] = { userId: 'u2', date: today, events: [ev(n - 168 * M, 'in'), ev(n - 158 * M, 'pick'), ev(n - 9 * M, 'r', 'r_pauza', '', true)] };
-  S.days['u3_' + today] = { userId: 'u3', date: today, events: [ev(n - 14 * M, 'in')] };
+  S.days['u1_' + today] = { userId: 'u1', date: today, site: SITE0, events: [ev(n - 172 * M, 'in'), ev(n - 160 * M, 'pick'), ev(n - 75 * M, 'r', 'r_problema', cmts[0], true), ev(n - 63 * M, 'pick')] };
+  S.days['u2_' + today] = { userId: 'u2', date: today, site: SITE0, events: [ev(n - 168 * M, 'in'), ev(n - 158 * M, 'pick'), ev(n - 9 * M, 'r', 'r_pauza', '', true)] };
+  S.days['u3_' + today] = { userId: 'u3', date: today, site: SITE0, events: [ev(n - 14 * M, 'in')] };
+  if (SITES[1]) S.days['v1_' + today] = { userId: 'v1', date: today, site: SITES[1].id, events: [ev(n - 95 * M, 'in'), ev(n - 88 * M, 'pick')] };
+  if (SITES[2]) S.days['w1_' + today] = { userId: 'w1', date: today, site: SITES[2].id, events: [ev(n - 120 * M, 'in'), ev(n - 110 * M, 'pick'), ev(n - 20 * M, 'r', 'r_pauza', '', true)] };
   return S;
 }
 function DemoStore() {
-  var KEY = 'ptc_demo_v1', S = LS.get(KEY, null), subs = [];
-  if (!S || !S.roster) { S = seedDemo(); LS.set(KEY, S); }
+  var KEY = 'ptc_demo_v3', S = LS.get(KEY, null), subs = [];
+  if (!S || !S.roster || !S.configs) { S = seedDemo(); LS.set(KEY, S); }
   function save() { LS.set(KEY, S); subs.slice().forEach(function (f) { try { f(); } catch (e) { console.error(e); } }); }
   function sub(f) { subs.push(f); f(); return function () { subs = subs.filter(function (x) { return x !== f; }); }; }
-  function range(from, to) { return Object.keys(S.days).map(function (k) { return S.days[k]; }).filter(function (d) { return d.date >= from && d.date <= to; }).map(clone); }
+  function range(site, from, to) { return Object.keys(S.days).map(function (k) { return S.days[k]; }).filter(function (d) { return (d.site || SITE0) === site && d.date >= from && d.date <= to; }).map(clone); }
   return {
     mode: 'demo',
     boot: function () { return Promise.resolve({ setupDone: true }); },
@@ -153,20 +175,20 @@ function DemoStore() {
       if (!u || S.pins[userId] !== pin) return Promise.reject(E('PIN greșit', 'pin'));
       if (!u.active) return Promise.reject(E('Cont dezactivat. Vorbește cu adminul.'));
       LS.set('ptc_demo_me', userId);
-      return Promise.resolve({ userId: userId, role: u.role, name: u.name });
+      return Promise.resolve({ userId: userId, role: u.role, scope: u.scope || '', name: u.name });
     },
-    resume: function () { var id = LS.get('ptc_demo_me', null), u = id && S.roster[id]; return Promise.resolve(u && u.active !== false ? { userId: id, role: u.role, name: u.name } : null); },
+    resume: function () { var id = LS.get('ptc_demo_me', null), u = id && S.roster[id]; return Promise.resolve(u && u.active !== false ? { userId: id, role: u.role, scope: u.scope || '', name: u.name } : null); },
     logout: function () { LS.del('ptc_demo_me'); return Promise.resolve(); },
     changePin: function (userId, oldPin, newPin) { if (S.pins[userId] !== oldPin) return Promise.reject(E('PIN-ul vechi e greșit')); S.pins[userId] = newPin; save(); return Promise.resolve(); },
-    config: function () { return Promise.resolve(clone(S.config)); },
-    saveConfig: function (c) { S.config = clone(c); save(); return Promise.resolve(); },
+    config: function (site) { return Promise.resolve(clone(S.configs[site]) || defaultConfig(site)); },
+    saveConfig: function (site, c) { S.configs[site] = clone(c); save(); return Promise.resolve(); },
     watchDays: function (ids, cb) { return sub(function () { var m = {}; ids.forEach(function (id) { m[id] = clone(S.days[id]) || null; }); cb(m, false); }); },
     getDays: function (ids) { var m = {}; ids.forEach(function (id) { m[id] = clone(S.days[id]) || null; }); return Promise.resolve(m); },
-    appendEvent: function (userId, date, ev) { var id = userId + '_' + date; if (!S.days[id]) S.days[id] = { userId: userId, date: date, events: [] }; S.days[id].events.push(ev); save(); return Promise.resolve(); },
-    watchRange: function (from, to, cb) { return sub(function () { cb(range(from, to)); }); },
-    getRange: function (from, to) { return Promise.resolve(range(from, to)); },
-    saveDay: function (id, doc) { S.days[id] = { userId: doc.userId, date: doc.date, events: clone(doc.events) }; save(); return Promise.resolve(); },
-    addUser: function (u) { var id = 'u' + rid(6); S.roster[id] = { name: u.name, role: u.role, wmsId: u.wmsId || '', active: true }; S.pins[id] = u.pin; save(); return Promise.resolve(id); },
+    appendEvent: function (userId, date, ev, site) { var id = userId + '_' + date; if (!S.days[id]) S.days[id] = { userId: userId, date: date, events: [] }; S.days[id].site = site; S.days[id].events.push(ev); save(); return Promise.resolve(); },
+    watchRange: function (site, from, to, cb) { return sub(function () { cb(range(site, from, to)); }); },
+    getRange: function (site, from, to) { return Promise.resolve(range(site, from, to)); },
+    saveDay: function (id, doc) { S.days[id] = { userId: doc.userId, date: doc.date, site: doc.site, events: clone(doc.events) }; save(); return Promise.resolve(); },
+    addUser: function (u) { var id = 'u' + rid(6); S.roster[id] = { name: u.name, role: u.role, scope: u.scope || '', wmsId: u.wmsId || '', site: u.site, active: true }; S.pins[id] = u.pin; save(); return Promise.resolve(id); },
     updateUser: function (id, patch) { Object.assign(S.roster[id], patch); save(); return Promise.resolve(); },
     resetPin: function (id, pin) { S.pins[id] = pin; save(); return Promise.resolve(); },
     setTeamCode: function () { return Promise.resolve(); },
@@ -210,8 +232,8 @@ function FirebaseStore(fbCfg) {
       return readRoster().catch(function () { return rosterCache || {}; }).then(function (r) {
         var name = (r[userId] || {}).name || (fallback && fallback.name) || 'Utilizator';
         return hashPin(userId, pin).then(function (h) {
-          LS.set('ptc_me', { userId: userId, name: name, email: email, role: acc.role, h: h }); loggedIn = true;
-          return { userId: userId, role: acc.role, name: name };
+          LS.set('ptc_me', { userId: userId, name: name, email: email, role: acc.role, scope: acc.scope || '', h: h }); loggedIn = true;
+          return { userId: userId, role: acc.role, scope: acc.scope || '', name: name };
         });
       });
     });
@@ -238,8 +260,8 @@ function FirebaseStore(fbCfg) {
         b.set(db.doc('accounts/' + teamUid), { userId: '', role: 'team', active: true });
         b.set(db.doc('meta/roster'), { users: users, teamUid: teamUid });
         b.set(db.doc('meta/config'), defaultConfig());
-        b.set(db.doc('meta/public'), { setupDone: true, teamEmail: teamEmail, createdAt: FV.serverTimestamp() });
-        return b.commit().then(function () { pub = { setupDone: true, teamEmail: teamEmail }; LS.set('ptc_pub', pub); LS.set('ptc_team', o.teamCode); });
+        b.set(db.doc('meta/public'), { setupDone: true, teamEmail: teamEmail, sdMigrated: true, createdAt: FV.serverTimestamp() });
+        return b.commit().then(function () { pub = { setupDone: true, teamEmail: teamEmail, sdMigrated: true }; LS.set('ptc_pub', pub); LS.set('ptc_team', o.teamCode); });
       }).then(function () { return finishLogin(userId, o.pin, { name: o.name }); });
     },
     // lista de nume: are nevoie de codul echipei (o singură dată pe telefon)
@@ -273,7 +295,7 @@ function FirebaseStore(fbCfg) {
           return auth.signInWithEmailAndPassword(f.email, pinPass(pin)).catch(function () { throw E('PIN greșit', 'pin'); });
         });
       }).then(function (r) {
-        if (r === 'offline') { loggedIn = true; return { userId: me.userId, role: me.role, name: me.name }; }
+        if (r === 'offline') { loggedIn = true; return { userId: me.userId, role: me.role, scope: me.scope || '', name: me.name }; }
         return finishLogin(userId, pin, u);
       });
     },
@@ -281,10 +303,10 @@ function FirebaseStore(fbCfg) {
     resume: function () {
       var me = LS.get('ptc_me', null), u = auth.currentUser;
       if (!me || !u || u.email !== me.email) return Promise.resolve(null);
-      var ok = function () { loggedIn = true; return { userId: me.userId, role: me.role, name: me.name }; };
+      var ok = function () { loggedIn = true; return { userId: me.userId, role: me.role, scope: me.scope || '', name: me.name }; };
       return db.doc('accounts/' + u.uid).get().then(function (a) {
         if (!a.exists || !a.data().active || a.data().userId !== me.userId) return null;   // cont dezactivat sau PIN resetat → cere PIN
-        if (a.data().role !== me.role) { me.role = a.data().role; LS.set('ptc_me', me); }
+        if (a.data().role !== me.role || (a.data().scope || '') !== (me.scope || '')) { me.role = a.data().role; me.scope = a.data().scope || ''; LS.set('ptc_me', me); }
         return ok();
       }, function (e) { return e && e.code === 'permission-denied' ? null : ok(); });   // fără semnal: merg pe ce e salvat pe telefon
     },
@@ -295,8 +317,16 @@ function FirebaseStore(fbCfg) {
         .then(function () { return u.updatePassword(pinPass(newPin)); })
         .then(function () { return hashPin(userId, newPin); }).then(function (h) { var me = LS.get('ptc_me', null); if (me) { me.h = h; LS.set('ptc_me', me); } });
     },
-    config: function () { return db.doc('meta/config').get().then(function (s) { return s.exists ? s.data() : defaultConfig(); }); },
-    saveConfig: function (c) { return db.doc('meta/config').set(clone(c)); },
+    // setările (durata zilei + activitățile) sunt separate pe depozit, în același document: meta/config.bySite.<depozit>
+    config: function (site) {
+      return db.doc('meta/config').get().then(function (s) {
+        var d = s.exists ? s.data() : {}, b = d.bySite && d.bySite[site];
+        if (b && b.reasons) return b;
+        if (site === SITE0 && d.reasons) return { normMin: d.normMin, reasons: d.reasons };   // setările făcute înainte de împărțirea pe depozite
+        return defaultConfig(site);
+      });
+    },
+    saveConfig: function (site, c) { var o = { bySite: {} }; o.bySite[site] = clone(c); return db.doc('meta/config').set(o, { merge: true }); },
     watchDays: function (ids, cb) {
       var m = {}, pend = {}, got = 0, uns = ids.map(function (id) {
         var first = true;
@@ -308,28 +338,39 @@ function FirebaseStore(fbCfg) {
       return function () { uns.forEach(function (u) { u(); }); };
     },
     getDays: function (ids) { return Promise.all(ids.map(function (id) { return db.doc('days/' + id).get(); })).then(function (ss) { var m = {}; ss.forEach(function (s, i) { m[ids[i]] = s.exists ? s.data() : null; }); return clone(stripTs(m)); }); },
-    appendEvent: function (userId, date, ev) {
-      var data = { userId: userId, date: date, events: FV.arrayUnion(ev), updatedAt: FV.serverTimestamp(), recv: {} };
+    appendEvent: function (userId, date, ev, site) {
+      // sd = depozit + dată: după el se citesc pontajele unui singur depozit (mai puține citiri din limita gratuită)
+      var data = { userId: userId, date: date, site: site, sd: site + '_' + date, events: FV.arrayUnion(ev), updatedAt: FV.serverTimestamp(), recv: {} };
       data.recv[ev.id] = FV.serverTimestamp();   // ora la care a ajuns la server (audit)
       return db.doc('days/' + userId + '_' + date).set(data, { merge: true });
     },
-    watchRange: function (from, to, cb) {
-      return db.collection('days').where('date', '>=', from).where('date', '<=', to).onSnapshot(function (q) { cb(q.docs.map(function (d) { return clone(stripTs(d.data())); })); }, function (e) { console.error(e); toast('Eroare la citire: ' + emsg(e)); });
+    watchRange: function (site, from, to, cb) {
+      return db.collection('days').where('sd', '>=', site + '_' + from).where('sd', '<=', site + '_' + to).onSnapshot(function (q) { cb(q.docs.map(function (d) { return clone(stripTs(d.data())); })); }, function (e) { console.error(e); toast('Eroare la citire: ' + emsg(e)); });
     },
-    getRange: function (from, to) { return db.collection('days').where('date', '>=', from).where('date', '<=', to).get().then(function (q) { return q.docs.map(function (d) { return clone(stripTs(d.data())); }); }); },
-    saveDay: function (id, doc, who) { return db.doc('days/' + id).set({ userId: doc.userId, date: doc.date, events: clone(doc.events), updatedAt: FV.serverTimestamp(), editedBy: who || '' }, { merge: true }); },
+    getRange: function (site, from, to) { return db.collection('days').where('sd', '>=', site + '_' + from).where('sd', '<=', site + '_' + to).get().then(function (q) { return q.docs.map(function (d) { return clone(stripTs(d.data())); }); }); },
+    saveDay: function (id, doc, who) { return db.doc('days/' + id).set({ userId: doc.userId, date: doc.date, site: doc.site, sd: doc.site + '_' + doc.date, events: clone(doc.events), updatedAt: FV.serverTimestamp(), editedBy: who || '' }, { merge: true }); },
+    // o singură dată: pontajele dinainte de împărțirea pe depozite primesc depozitul inițial, ca să apară în liste
+    migrate: function () {
+      if (pub && pub.sdMigrated) return Promise.resolve(0);
+      return db.collection('days').where('date', '>=', '2000-01-01').get().then(function (q) {
+        var todo = q.docs.filter(function (d) { return !d.data().sd; }), b = db.batch(), done = todo.length <= 400;
+        todo.slice(0, 400).forEach(function (d) { var x = d.data(), st = siteOk(x.site) ? x.site : SITE0; b.update(d.ref, { site: st, sd: st + '_' + x.date }); });
+        b.set(db.doc('meta/public'), { sdMigrated: done }, { merge: true });
+        return b.commit().then(function () { pub.sdMigrated = done; LS.set('ptc_pub', pub); return todo.length; });
+      });
+    },
     addUser: function (o) {
       var userId = 'u' + rid(8), email = newEmail(userId);
       return mkAccount(email, pinPass(o.pin)).then(function (uid) {
-        var b = db.batch(), up = {}; up['users.' + userId] = { name: o.name, role: o.role, wmsId: o.wmsId || '', active: true, email: email, authUid: uid };
-        b.set(db.doc('accounts/' + uid), { userId: userId, role: o.role, active: true });
+        var b = db.batch(), up = {}; up['users.' + userId] = { name: o.name, role: o.role, scope: o.scope || '', wmsId: o.wmsId || '', site: o.site || SITE0, active: true, email: email, authUid: uid };
+        b.set(db.doc('accounts/' + uid), { userId: userId, role: o.role, scope: o.scope || '', active: true });
         b.update(db.doc('meta/roster'), up);
         return b.commit();
       }).then(readRoster).then(function () { return userId; });
     },
     updateUser: function (id, patch) {
       var u = (rosterCache || {})[id], b = db.batch(), up = {}, acc = {};
-      Object.keys(patch).forEach(function (k) { up['users.' + id + '.' + k] = patch[k]; if (k === 'role' || k === 'active') acc[k] = patch[k]; });
+      Object.keys(patch).forEach(function (k) { up['users.' + id + '.' + k] = patch[k]; if (k === 'role' || k === 'active' || k === 'scope') acc[k] = patch[k]; });
       b.update(db.doc('meta/roster'), up);
       if (Object.keys(acc).length && u && u.authUid) b.update(db.doc('accounts/' + u.authUid), acc);
       return b.commit().then(readRoster);
@@ -338,7 +379,7 @@ function FirebaseStore(fbCfg) {
       var u = rosterCache[id], email = newEmail(id);
       return mkAccount(email, pinPass(pin)).then(function (uid) {
         var b = db.batch(), up = {}; up['users.' + id + '.email'] = email; up['users.' + id + '.authUid'] = uid;
-        b.set(db.doc('accounts/' + uid), { userId: id, role: u.role, active: u.active !== false });
+        b.set(db.doc('accounts/' + uid), { userId: id, role: u.role, scope: u.scope || '', active: u.active !== false });
         if (u.authUid) b.delete(db.doc('accounts/' + u.authUid));
         b.update(db.doc('meta/roster'), up);
         return b.commit();
@@ -376,35 +417,52 @@ function FirebaseStore(fbCfg) {
 
 /* ───────────── stare aplicație ───────────── */
 var store, session = null, cfg = defaultConfig(), roster = {};
-var ui = { screen: 'boot', tab: 'pontaj', pin: '', pinUser: null, err: '', rep: null, repUser: '', repFrom: '', repTo: '', repDay: '' };
+var ui = { site: null, screen: 'boot', tab: 'pontaj', pin: '', pinUser: null, err: '', rep: null, repUser: '', repFrom: '', repTo: '', repDay: '' };
 var my = { docs: {}, keys: [], pending: false, unsub: null };
 var adm = { live: [], unsub: null };
-var busy = false, actBusy = false, tickTimer = null;
+var busy = false, actBusy = false, tickTimer = null, lastClockSync = 0;
 
 function toast(msg) { var t = $('#toast'); t.textContent = msg; t.classList.remove('hidden'); clearTimeout(toast._t); toast._t = setTimeout(function () { t.classList.add('hidden'); }, 3200); }
 function sheet(html) { var s = $('#sheet'); if (html == null) { s.classList.add('hidden'); s.innerHTML = ''; ui.edit = null; return; } s.innerHTML = '<div class="box">' + html + '</div>'; s.classList.remove('hidden'); }
 function isAdmin() { return session && session.role === 'admin'; }
+function isUniversal() { return isAdmin() && !session.scope; }             // vede și administrează toate depozitele
+function roleOf(u) { return u.role !== 'admin' ? 'operator' : (u.scope ? 'siteadmin' : 'admin'); }
+var ROLE_LBL = { operator: 'Operator', siteadmin: 'Admin depozit', admin: 'Admin universal' };
 function activeReasons() { return (cfg.reasons || []).filter(function (r) { return r.active !== false; }); }
 function people(includeInactive) {
+  // oamenii depozitului curent: operatorii lui, adminii lui de depozit și adminii universali
+  // (un admin de depozit nu îi vede pe adminii universali și nici oamenii altor depozite)
+  var hideUniversal = session && isAdmin() && !isUniversal();
   return Object.keys(roster).map(function (id) { return Object.assign({ id: id }, roster[id]); })
-    .filter(function (u) { return u.role !== 'team' && (includeInactive || u.active !== false); })
+    .filter(function (u) {
+      if (u.role === 'team' || (!includeInactive && u.active === false)) return false;
+      var r = roleOf(u);
+      if (r === 'admin') return !hideUniversal;
+      return (r === 'siteadmin' ? u.scope : userSite(u)) === ui.site;
+    })
     .sort(function (a, b) { return a.name.localeCompare(b.name, 'ro'); });
 }
-
+function setCfg(c) { cfg = c || defaultConfig(ui.site); if (!cfg.reasons) cfg.reasons = defaultConfig(ui.site).reasons; if (!cfg.normMin) cfg.normMin = 510; }
 /* ───────────── pornire / autentificare ───────────── */
 function start() {
   store = window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.apiKey ? FirebaseStore(window.FIREBASE_CONFIG) : DemoStore();
+  ui.site = LS.get('ptc_site', null); if (!siteOk(ui.site)) ui.site = null;
   store.boot().then(function (b) {
     if (!b.setupDone) { ui.screen = 'setup'; return render(); }
     return store.resume().catch(function () { return null; }).then(function (s) {
       if (s) return enterSession(s);
       var me = LS.get('ptc_me', null);
-      if (me && store.mode === 'firebase') { ui.pinUser = { id: me.userId, name: me.name }; ui.screen = 'pin'; return render(); }
-      return showRoster();
+      if (me && ui.site && store.mode === 'firebase') { ui.pinUser = { id: me.userId, name: me.name }; ui.screen = 'pin'; return render(); }
+      return showSites();
     });
   }).catch(function (e) { console.error(e); ui.screen = 'fatal'; ui.err = emsg(e); render(); });
 }
+function showSites() {   // primul ecran: alegi depozitul, apoi numele și PIN-ul
+  if (SITES.length === 1) { ui.site = SITE0; return showRoster(); }
+  ui.screen = 'sites'; ui.err = ''; render();
+}
 function showRoster(code) {
+  if (!ui.site) return showSites();
   return store.roster(code).then(function (r) { roster = r; ui.screen = 'roster'; ui.err = ''; render(); })
     .catch(function (e) { if (e.code === 'need-team') { ui.screen = 'team'; ui.err = code ? emsg(e) : ''; } else { ui.screen = 'fatal'; ui.err = emsg(e); } render(); });
 }
@@ -414,18 +472,33 @@ function doLogin(pin) {
 }
 function enterSession(s) {
   session = s; ui.pin = '';
-  return Promise.all([store.config().catch(function () { return defaultConfig(); }), store.roster().catch(function () { return roster; })]).then(function (a) {
-    cfg = a[0] || defaultConfig(); if (!cfg.reasons) cfg.reasons = defaultConfig().reasons; if (!cfg.normMin) cfg.normMin = 510;
-    roster = a[1] || roster;
-    if (roster[s.userId] && roster[s.userId].name) session.name = roster[s.userId].name;
+  return store.roster().catch(function () { return roster; }).then(function (r) {
+    roster = r || roster; var u = roster[s.userId];
+    if (u && u.name) session.name = u.name;
+    if (!isAdmin()) ui.site = userSite(u);          // operatorul ține de un singur depozit
+    else if (session.scope) ui.site = session.scope;           // adminul de depozit: doar depozitul lui
+    else if (!ui.site) ui.site = SITE0;             // adminul universal lucrează pe depozitul ales la intrare și îl poate schimba din antet
+    LS.set('ptc_site', ui.site);
+    return store.config(ui.site).catch(function () { return defaultConfig(ui.site); });
+  }).then(function (c) {
+    setCfg(c);
     ui.screen = 'main'; ui.tab = isAdmin() ? 'azi' : 'pontaj'; busy = false;
     store.syncClock().then(function (o) { clockOffset = o; LS.set('ptc_offset', o); }).catch(function () {});
+    lastClockSync = Date.now();
+    if (isUniversal() && store.migrate) store.migrate().catch(function (e) { console.error(e); });
     enterTab(); render();
   });
 }
+function switchSite(id) {   // doar admin: trece pe alt depozit fără să iasă din cont
+  if (!isUniversal() || !siteOk(id) || id === ui.site) return sheet(null);
+  ui.site = id; LS.set('ptc_site', id); sheet(null);
+  if (adm.unsub) { adm.unsub(); adm.unsub = null; } adm.loaded = false; adm.live = []; ui.rep = null; ui.repUser = '';
+  store.config(id).catch(function () { return defaultConfig(id); }).then(function (c) { setCfg(c); enterTab(); render(); window.scrollTo(0, 0); });
+  render();
+}
 function logout() {
   stopWatch(); session = null; sheet(null);
-  store.logout().then(function () { ui.pinUser = null; ui.pin = ''; showRoster(); });
+  store.logout().then(function () { ui.pinUser = null; ui.pin = ''; showSites(); });
 }
 function stopWatch() { if (my.unsub) { my.unsub(); my.unsub = null; } if (adm.unsub) { adm.unsub(); adm.unsub = null; } my.docs = {}; my.keys = []; }
 
@@ -456,7 +529,7 @@ function act(s, extra) {
   var A = activeDay(), t = now(); if (A.c.last && t <= A.c.last.t) t = A.c.last.t + 1;
   var ev = Object.assign({ id: rid(10), t: t, d: Date.now(), s: s }, extra || {});
   var date = A.date; if (s === 'in' && !A.c.open) date = my.day[1];
-  store.appendEvent(session.userId, date, ev).catch(function (e) { console.error(e); toast('Nu s-a putut salva: ' + emsg(e)); });
+  store.appendEvent(session.userId, date, ev, ui.site).catch(function (e) { console.error(e); toast('Nu s-a putut salva: ' + emsg(e)); });
   sheet(null);
 }
 function startReason(ridv, comment) {
@@ -538,10 +611,10 @@ function viewZile() {
 /* ───────────── admin: azi (live) ───────────── */
 function watchLive() {
   var t = dateKey(now()), y = addDays(t, -1);
-  if (adm.unsub && adm.key === t) return;
+  if (adm.unsub && adm.key === t && adm.site === ui.site) return;
   if (adm.unsub) adm.unsub();
-  adm.key = t;
-  adm.unsub = store.watchRange(y, t, function (docs) { adm.live = docs; adm.loaded = true; if (ui.screen === 'main' && ui.tab === 'azi') render(); });
+  adm.key = t; adm.site = ui.site;
+  adm.unsub = store.watchRange(ui.site, y, t, function (docs) { adm.live = docs; adm.loaded = true; if (ui.screen === 'main' && ui.tab === 'azi') render(); });
 }
 function liveFor(userId) {
   var t = adm.key, y = addDays(t, -1), n = now(), dt = null, dy = null;
@@ -565,7 +638,7 @@ function viewAzi() {
       '<span class="rt small">' + (c.arrival ? 'sosire <b>' + fmtTime(c.arrival) + '</b><br>picking <b>' + live(liveParts(c, 'pick')[0], liveParts(c, 'pick')[1]) + '</b>' + (overtime(c, cfg) ? '<br><span class="ot">supl. ' + live(liveParts(c, 'all')[0], liveParts(c, 'all')[1], (cfg.normMin || 510) * 60000) + '</span>' : '') : '') + '</span></button>';
     return { o: order[key], html: html, name: u.name };
   }).sort(function (a, b) { return a.o - b.o || a.name.localeCompare(b.name, 'ro'); });
-  return '<div class="card"><h3>Acum · ' + fmtDate(adm.key, true) + ' ' + fmtTimeM(n) + '</h3><div class="kv" style="grid-template-columns:repeat(4,1fr)"><div><b>' + cnt.pick + '</b><span>la picking</span></div><div><b>' + cnt.brk + '</b><span>în pauză</span></div><div><b>' + cnt.other + '</b><span>alte activități</span></div><div><b>' + cnt.off + '</b><span>plecați / nepontați</span></div></div></div>' +
+  return '<div class="card"><h3>' + esc(siteName(ui.site)) + ' · acum · ' + fmtDate(adm.key, true) + ' ' + fmtTimeM(n) + '</h3><div class="kv" style="grid-template-columns:repeat(4,1fr)"><div><b>' + cnt.pick + '</b><span>la picking</span></div><div><b>' + cnt.brk + '</b><span>în pauză</span></div><div><b>' + cnt.other + '</b><span>alte activități</span></div><div><b>' + cnt.off + '</b><span>plecați / nepontați</span></div></div></div>' +
     '<div class="livegrid">' + cards.map(function (c) { return c.html; }).join('') + '</div><div class="small mut center" style="margin-top:10px">Apasă pe un om ca să vezi ziua lui sau să corectezi pontajul.</div>';
 }
 
@@ -584,7 +657,7 @@ function openDay(userId, date) {
       var ty = e.s === 'r' ? 'r:' + e.rid : e.s; if (e.s === 'r') names[ty] = e.rn;
       return { ev: e, time: fmtTime(e.t), time0: fmtTime(e.t), type: ty, type0: ty, c: e.c || '', c0: e.c || '', next: dateKey(e.t) !== date };
     });
-    ui.edit = { id: id, userId: userId, date: date, rows: rows, names: names, recv: d.recv || {}, mode: 'view' };
+    ui.edit = { id: id, userId: userId, date: date, site: siteOk(d.site) ? d.site : ui.site, rows: rows, names: names, recv: d.recv || {}, mode: 'view' };
     renderEdit();
   }).catch(function (e) { toast(emsg(e)); });
 }
@@ -604,7 +677,7 @@ function editDoc() {   // construiesc documentul din rândurile editorului
   }).sort(function (a, b) { return a.t - b.t; });
   // "picking pe pauză": o activitate care urmează direct după picking
   evs.forEach(function (e, i) { if (e.s === 'r' && e.by) { if (i > 0 && (evs[i - 1].s === 'pick' || (evs[i - 1].s === 'r' && evs[i - 1].fp))) e.fp = true; else delete e.fp; } });
-  return { userId: ed.userId, date: ed.date, events: evs };
+  return { userId: ed.userId, date: ed.date, site: ed.site, events: evs };
 }
 function renderEdit() {
   var ed = ui.edit, u = roster[ed.userId] || { name: ed.userId }, h = '<h2>' + esc(u.name) + ' · ' + fmtDate(ed.date, true) + '</h2>';
@@ -627,10 +700,14 @@ function renderEdit() {
 
 /* ───────────── admin: rapoarte ───────────── */
 function monthStart(dk) { return dk.slice(0, 8) + '01'; }
-function runReport() {
+function runReport(force) {
   var from = ui.repFrom, to = ui.repTo; if (!from || !to || from > to) { toast('Alege o perioadă validă'); return; }
-  ui.rep = null; ui.repLoading = true; render();
-  store.getRange(from, to).then(function (docs) { ui.repLoading = false; ui.rep = buildReport(docs); render(); }).catch(function (e) { ui.repLoading = false; toast(emsg(e)); render(); });
+  var a = from.split('-').map(Number), b = to.split('-').map(Number), days = Math.round((Date.UTC(b[0], b[1] - 1, b[2]) - Date.UTC(a[0], a[1] - 1, a[2])) / 86400000) + 1;
+  if (days > 366) { toast('Perioada maximă pentru un raport este de un an'); return; }
+  var est = Math.round(people(true).length * days * 5 / 7);   // o citire pentru fiecare om și zi lucrată
+  if (est > 6000 && !force && store.mode === 'firebase') { ui.rep = null; ui.repWarn = est; return render(); }
+  ui.repWarn = 0; ui.rep = null; ui.repLoading = true; render();
+  store.getRange(ui.site, from, to).then(function (docs) { ui.repLoading = false; ui.rep = buildReport(docs); render(); }).catch(function (e) { ui.repLoading = false; toast(emsg(e)); render(); });
 }
 function buildReport(docs) {
   var n = now(), reasons = {}, days = [], users = {};
@@ -651,10 +728,11 @@ function buildReport(docs) {
 function dayNote(c) { return c.missingOut ? 'plecare nebifată' : c.open ? 'în curs' : c.edited ? 'corectat de admin' : ''; }
 function viewRapoarte() {
   var t = dateKey(now()); if (!ui.repFrom) { ui.repFrom = monthStart(t); ui.repTo = t; }
-  var h = '<div class="card"><h3>Raport</h3><div class="filters"><div><label class="f">De la</label><input class="in" type="date" id="rf" value="' + ui.repFrom + '"></div><div><label class="f">Până la</label><input class="in" type="date" id="rt" value="' + ui.repTo + '"></div>' +
+  var h = '<div class="card"><h3>Raport · ' + esc(siteName(ui.site)) + '</h3><div class="filters"><div><label class="f">De la</label><input class="in" type="date" id="rf" value="' + ui.repFrom + '"></div><div><label class="f">Până la</label><input class="in" type="date" id="rt" value="' + ui.repTo + '"></div>' +
     '<div><label class="f">Utilizator</label><select class="in" id="ru"><option value="">Toți</option>' + people(true).map(function (u) { return '<option value="' + u.id + '"' + (ui.repUser === u.id ? ' selected' : '') + '>' + esc(u.name) + '</option>'; }).join('') + '</select></div>' +
     '<div style="display:flex;align-items:flex-end"><button class="btn navy" style="min-height:48px" data-a="repRun">Afișează</button></div></div></div>';
   if (ui.repLoading) return h + '<div class="center mut" style="padding:30px">Se calculează…</div>';
+  if (ui.repWarn) return h + '<div class="card" style="background:var(--amber-bg);color:#6b3d00"><b>Raport mare.</b> Perioada aleasă înseamnă până la ~' + ui.repWarn.toLocaleString('ro-RO') + ' de citiri din limita gratuită de 50.000 pe zi (comună pentru toate depozitele). Dacă limita se atinge, aplicația nu mai salvează pontaje până a doua zi dimineață. Mai sigur: rulează-l după program sau pe o perioadă mai scurtă.<button class="btn ghost" style="margin-top:10px;background:#fff" data-a="repForce">Rulează oricum</button></div>';
   var R = ui.rep; if (!R) return h + '<div class="card mut">Alege perioada și apasă „Afișează”. Pentru un singur om, alege-l din listă – vezi fiecare zi și fiecare activitate.</div>';
   var rc = R.reasons;
   if (!ui.repUser) {
@@ -715,7 +793,7 @@ function exportXlsx() {
     X.utils.book_append_sheet(wb, mk(s2, f2, [26, 12, 12]), 'Zilnic');
     X.utils.book_append_sheet(wb, mk(s3, { 2: DT, 3: 'hh:mm:ss', 4: 'hh:mm:ss', 5: D }, [26, 12, 12, 10, 10, 10, 9, 22, 16, 40, 24]), 'Activitati');
     X.utils.book_append_sheet(wb, mk(s4, { 2: DT, 5: T }, [12, 26, 12, 20, 22, 16]), 'Ore picking');
-    var name = 'Pontaj_TC_' + R.from + '_' + R.to + (f ? '_' + ((roster[f] || {}).name || f).replace(/[^\w]+/g, '_') : '') + '.xlsx';
+    var name = APP.replace(/[^\w]+/g, '_') + '_' + siteName(ui.site).replace(/[^\w]+/g, '_') + '_' + R.from + '_' + R.to + (f ? '_' + ((roster[f] || {}).name || f).replace(/[^\w]+/g, '_') : '') + '.xlsx';
     var buf = X.write(wb, { bookType: 'xlsx', type: 'array' });
     saveFile(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), name);
   };
@@ -731,18 +809,24 @@ function saveFile(blob, name) {
 
 /* ───────────── admin: echipă ───────────── */
 function viewEchipa() {
-  var h = '<button class="btn green" data-a="userNew">+ Utilizator nou</button><div style="height:12px"></div>';
+  var h = '<button class="btn green" data-a="userNew">+ Utilizator nou la ' + esc(siteName(ui.site)) + '</button><div style="height:12px"></div>';
   h += people(true).map(function (u) {
-    return '<button class="ucard" data-a="userEdit" data-u="' + u.id + '"' + (u.active === false ? ' style="opacity:.55"' : '') + '><span class="ava">' + esc(initials(u.name)) + '</span><span><span class="nm">' + esc(u.name) + '</span><br><span class="small mut">' + (u.role === 'admin' ? 'Admin' : 'Operator') + (u.wmsId ? ' · WMS ' + esc(u.wmsId) : '') + (u.active === false ? ' · dezactivat' : '') + '</span></span><span class="rt mut">›</span></button>';
+    return '<button class="ucard" data-a="userEdit" data-u="' + u.id + '"' + (u.active === false ? ' style="opacity:.55"' : '') + '><span class="ava">' + esc(initials(u.name)) + '</span><span><span class="nm">' + esc(u.name) + '</span><br><span class="small mut">' + (SITES.length > 1 ? ROLE_LBL[roleOf(u)] : (u.role === 'admin' ? 'Admin' : 'Operator')) + (u.wmsId ? ' · WMS ' + esc(u.wmsId) : '') + (u.active === false ? ' · dezactivat' : '') + '</span></span><span class="rt mut">›</span></button>';
   }).join('');
   return h;
 }
 function userSheet(id) {
-  var u = id ? roster[id] : { name: '', role: 'operator', wmsId: '', active: true }, self = id && id === session.userId;
+  var u = id ? roster[id] : { name: '', role: 'operator', wmsId: '', active: true }, self = id && id === session.userId, uni = isUniversal(), multi = SITES.length > 1;
+  if (id && !uni && !self && u.role === 'admin') return toast('Doar adminul universal poate modifica adminii.');
   ui.userEdit = id || '';
-  var h = '<h2>' + (id ? 'Modifică utilizator' : 'Utilizator nou') + '</h2><label class="f">Nume și prenume</label><input class="in" id="un" value="' + esc(u.name) + '" autocomplete="off">' +
-    '<label class="f">Rol</label><select class="in" id="ur"' + (self ? ' disabled' : '') + '><option value="operator"' + (u.role === 'operator' ? ' selected' : '') + '>Operator</option><option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>Admin</option></select>' +
-    '<label class="f">ID user WMS (opțional – pentru legătura cu raportul de productivitate)</label><input class="in" id="uw" value="' + esc(u.wmsId || '') + '" autocomplete="off">';
+  var r = roleOf(u), st = id ? (r === 'siteadmin' ? u.scope : userSite(u)) : ui.site;
+  function opt(v, l) { return '<option value="' + v + '"' + (v === r ? ' selected' : '') + '>' + l + '</option>'; }
+  var h = '<h2>' + (id ? 'Modifică utilizator' : 'Utilizator nou') + '</h2><label class="f">Nume și prenume</label><input class="in" id="un" value="' + esc(u.name) + '" autocomplete="off">';
+  // rolurile le dă doar adminul universal; adminul de depozit adaugă doar operatori la depozitul lui
+  if (uni) h += '<label class="f">Rol</label><select class="in" id="ur"' + (self ? ' disabled' : '') + '>' + opt('operator', 'Operator') + (multi ? opt('siteadmin', 'Admin depozit – vede doar depozitul ales mai jos') : '') + opt('admin', multi ? 'Admin universal – vede toate depozitele' : 'Admin') + '</select>' +
+    (multi ? '<label class="f">Depozit</label><select class="in" id="us">' + SITES.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === st ? ' selected' : '') + '>' + esc(x.name) + '</option>'; }).join('') + '</select>' : '');
+  else h += '<div class="small mut" style="margin-top:8px">' + (self ? 'Admin depozit' : 'Operator') + ' · ' + esc(siteName(ui.site)) + '</div>';
+  h += '<label class="f">ID user WMS (opțional – pentru legătura cu raportul de productivitate)</label><input class="in" id="uw" value="' + esc(u.wmsId || '') + '" autocomplete="off">';
   if (!id) h += '<label class="f">PIN (4 cifre)</label><input class="in" id="up" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="ex. 4821">';
   h += '<div class="err" id="uerr"></div><div class="stack"><button class="btn green" data-a="userSave">Salvează</button>';
   if (id && !self) h += '<div class="row"><input class="in grow" id="unp" inputmode="numeric" maxlength="4" placeholder="PIN nou (4 cifre)" autocomplete="off"><button class="btn ghost sm" data-a="userPin">Resetează PIN</button></div>' +
@@ -755,15 +839,15 @@ function userSheet(id) {
 /* ───────────── admin: setări ───────────── */
 function viewSetari() {
   var nm = cfg.normMin || 510;
-  var h = '<div class="card"><h3>Ore suplimentare</h3><label class="f">Durata normală a unei zile (timpul contorizat de la sosire la plecare). Tot ce depășește această durată se calculează ca ore suplimentare.</label>' +
+  var h = (SITES.length > 1 ? '<div class="small mut" style="margin:0 4px 8px">Setările de mai jos sunt ale depozitului <b>' + esc(siteName(ui.site)) + '</b>. Fiecare depozit are durata zilei și activitățile lui.</div>' : '') + '<div class="card"><h3>Ore suplimentare</h3><label class="f">Durata normală a unei zile (timpul contorizat de la sosire la plecare). Tot ce depășește această durată se calculează ca ore suplimentare.</label>' +
     '<div class="row"><input class="in" type="number" inputmode="numeric" id="snh" min="0" max="16" value="' + Math.floor(nm / 60) + '" style="width:76px"><span>ore</span><input class="in" type="number" inputmode="numeric" id="snm" min="0" max="59" value="' + (nm % 60) + '" style="width:76px"><span class="grow">minute</span><button class="btn navy sm" data-a="normSave">Salvează</button></div>' +
     '<div class="small mut" style="margin-top:6px">Exemplu: la ' + Math.floor(nm / 60) + ' ore ' + (nm % 60) + ' min, cine stă ' + fmtDur((nm + 45) * 60000) + ' are 0:45:00 ore suplimentare.</div></div>';
   h += '<div class="card"><h3>Activități / motive de pauză la picking</h3>' + (cfg.reasons || []).map(function (r, i) {
     return '<button class="ucard" style="box-shadow:none;border:1px solid var(--line)' + (r.active === false ? ';opacity:.55' : '') + '" data-a="reasonEdit" data-i="' + i + '"><span class="dot ' + r.kind + '" style="margin:0"></span><span><span class="nm">' + esc(r.name) + '</span><br><span class="small mut">' + KIND_LBL[r.kind] + ' · ' + CMT_LBL[r.comment || 'none'] + (r.active === false ? ' · ascuns' : '') + '</span></span><span class="rt mut">›</span></button>';
   }).join('') + '<button class="btn ghost" data-a="reasonEdit" data-i="-1">+ Activitate nouă</button></div>';
-  if (store.mode === 'firebase') h += '<div class="card"><h3>Codul echipei</h3><div class="small mut">Se cere o singură dată pe fiecare telefon nou, ca lista de nume să nu fie vizibilă oricui are linkul. Dacă îl schimbi, telefoanele deja folosite merg în continuare.</div><div class="row" style="margin-top:8px"><input class="in grow" id="steam" placeholder="Cod nou (minim 4 caractere)" autocomplete="off"><button class="btn navy sm" data-a="teamSave">Schimbă</button></div></div>';
-  else h += '<div class="card"><h3>Mod demo</h3><div class="small mut">Datele sunt de probă și rămân doar pe acest dispozitiv.</div><button class="btn ghost" style="margin-top:8px" data-a="confirm" data-do="demoReset">Reface datele demo</button></div>';
-  h += '<div class="small mut center">Pontaj TC v' + APP_VERSION + '</div>';
+  if (store.mode === 'firebase' && isUniversal()) h += '<div class="card"><h3>Codul echipei</h3><div class="small mut">' + (SITES.length > 1 ? 'Același pentru toate depozitele. ' : '') + 'Se cere o singură dată pe fiecare telefon nou, ca lista de nume să nu fie vizibilă oricui are linkul. Dacă îl schimbi, telefoanele deja folosite merg în continuare.</div><div class="row" style="margin-top:8px"><input class="in grow" id="steam" placeholder="Cod nou (minim 4 caractere)" autocomplete="off"><button class="btn navy sm" data-a="teamSave">Schimbă</button></div></div>';
+  else if (store.mode !== 'firebase') h += '<div class="card"><h3>Mod demo</h3><div class="small mut">Datele sunt de probă și rămân doar pe acest dispozitiv.</div><button class="btn ghost" style="margin-top:8px" data-a="confirm" data-do="demoReset">Reface datele demo</button></div>';
+  h += '<div class="small mut center">' + esc(APP) + ' v' + APP_VERSION + '</div>';
   return h;
 }
 function reasonSheet(i) {
@@ -782,21 +866,23 @@ function pinPadHtml() {
   return '<div class="dots" id="dots">' + [0, 1, 2, 3].map(function (i) { return '<i class="' + (i < ui.pin.length ? 'f' : '') + '"></i>'; }).join('') + '</div><div class="pad">' + k + '<button class="x" data-a="pinBack">Înapoi</button><button data-a="pinKey" data-k="0">0</button><button class="x" data-a="pinDel">⌫ Șterge</button></div><div class="err" id="pinerr">' + esc(ui.err) + '</div>';
 }
 function renderPinDots(msg) { var d = $('#dots'); if (d) d.innerHTML = [0, 1, 2, 3].map(function (i) { return '<i class="' + (i < ui.pin.length ? 'f' : '') + '"></i>'; }).join(''); var e = $('#pinerr'); if (e && msg != null) { e.textContent = msg; e.style.color = 'var(--mut)'; } }
-function demoBar() { return store && store.mode === 'demo' ? '<div class="demo"><b>MOD DEMO</b> – date de probă, salvate doar pe acest dispozitiv. PIN admin: 1234 · operatori: 1111, 2222, 3333, 4444.</div>' : ''; }
+function demoBar() { return store && store.mode === 'demo' ? '<div class="demo"><b>MOD DEMO</b> – date de probă, salvate doar pe acest dispozitiv. PIN admin universal: 1234' + (SITES.length > 1 ? ' · admin doar ' + esc(SITES[0].name) + ': 7777' : '') + ' · operatori ' + esc(SITES[0].name) + ': 1111, 2222, 3333, 4444' + (SITES[1] ? ' · ' + esc(SITES[1].name) + ': 5555' : '') + (SITES[2] ? ' · ' + esc(SITES[2].name) + ': 6666' : '') + '.</div>' : ''; }
 function render() {
   var a = $('#app'), h = '';
-  if (ui.screen === 'fatal') h = '<div class="top"><div class="ttl">Pontaj TC</div></div><div class="wrap center" style="padding-top:60px"><p>' + esc(ui.err) + '</p><button class="btn navy" data-a="reload">Încearcă din nou</button></div>';
-  else if (ui.screen === 'setup') h = '<div class="top"><div class="ttl">Pontaj TC · configurare inițială</div></div><div class="wrap"><div class="card"><p style="margin-top:0">Aplicația e nouă. Creează contul de <b>admin</b>; restul utilizatorilor îi adaugi apoi din „Echipă”.</p>' +
+  if (ui.screen === 'fatal') h = '<div class="top"><div class="ttl">' + esc(APP) + '</div></div><div class="wrap center" style="padding-top:60px"><p>' + esc(ui.err) + '</p><button class="btn navy" data-a="reload">Încearcă din nou</button></div>';
+  else if (ui.screen === 'setup') h = '<div class="top"><div class="ttl">' + esc(APP) + ' · configurare inițială</div></div><div class="wrap"><div class="card"><p style="margin-top:0">Aplicația e nouă. Creează contul de <b>admin</b>; restul utilizatorilor îi adaugi apoi din „Echipă”.</p>' +
     '<label class="f">Numele tău</label><input class="in" id="sn" autocomplete="off"><label class="f">PIN admin (4 cifre)</label><input class="in" id="sp" inputmode="numeric" maxlength="4" autocomplete="off">' +
     '<label class="f">Codul echipei (minim 4 caractere) – îl dai oamenilor o singură dată, la prima deschidere pe telefon</label><input class="in" id="st" autocomplete="off"><div class="err" id="serr"></div><button class="btn green" data-a="setupGo">Creează</button></div></div>';
-  else if (ui.screen === 'team') h = '<div class="top"><div class="ttl">Pontaj TC</div></div><div class="wrap"><div class="card"><p style="margin-top:0">Introdu <b>codul echipei</b> (îl primești de la șeful de tură). Se cere o singură dată pe acest telefon.</p><input class="in" id="tc" autocomplete="off" autocapitalize="none"><div class="err">' + esc(ui.err) + '</div><button class="btn navy" data-a="teamGo">Continuă</button></div></div>';
-  else if (ui.screen === 'roster') h = '<div class="top"><div class="grow"><div class="ttl">Pontaj TC</div><div class="sub">Apasă pe numele tău</div></div></div>' + demoBar() + '<div class="wrap"><div class="names">' +
+  else if (ui.screen === 'sites') h = '<div class="top"><div class="grow"><div class="ttl">' + esc(APP) + '</div><div class="sub">Alege depozitul</div></div></div>' + demoBar() + '<div class="wrap"><div class="stack" style="margin-top:8px">' +
+    SITES.map(function (x) { return '<button class="btn xl navy" data-a="pickSite" data-s="' + esc(x.id) + '">' + esc(x.name) + '</button>'; }).join('') + '</div></div>';
+  else if (ui.screen === 'team') h = '<div class="top"><div class="ttl">' + esc(APP) + '</div></div><div class="wrap"><div class="card"><p style="margin-top:0">Introdu <b>codul echipei</b> (îl primești de la șeful de tură). Se cere o singură dată pe acest telefon.</p><input class="in" id="tc" autocomplete="off" autocapitalize="none"><div class="err">' + esc(ui.err) + '</div><button class="btn navy" data-a="teamGo">Continuă</button></div></div>';
+  else if (ui.screen === 'roster') h = '<div class="top"><div class="grow"><div class="ttl">' + esc(APP) + (SITES.length > 1 ? ' · ' + esc(siteName(ui.site)) : '') + '</div><div class="sub">Apasă pe numele tău</div></div>' + (SITES.length > 1 ? '<button data-a="sitesBack">‹ Depozite</button>' : '') + '</div>' + demoBar() + '<div class="wrap"><div class="names">' +
     people().map(function (u) { return '<button data-a="pickUser" data-u="' + u.id + '"><span class="ava">' + esc(initials(u.name)) + '</span><span>' + esc(u.name) + (u.role === 'admin' ? ' <span class="chip">admin</span>' : '') + '</span></button>'; }).join('') + '</div></div>';
-  else if (ui.screen === 'pin') h = '<div class="top"><div class="ttl">Pontaj TC</div></div>' + demoBar() + '<div class="wrap"><div class="pinbox"><div class="ava" style="margin:14px auto 8px;width:64px;height:64px;font-size:22px">' + esc(initials(ui.pinUser.name)) + '</div><h2>' + esc(ui.pinUser.name) + '</h2><div class="mut">Introdu PIN-ul</div>' + pinPadHtml() + '</div></div>';
+  else if (ui.screen === 'pin') h = '<div class="top"><div class="ttl">' + esc(APP) + (SITES.length > 1 ? ' · ' + esc(siteName(ui.site)) : '') + '</div></div>' + demoBar() + '<div class="wrap"><div class="pinbox"><div class="ava" style="margin:14px auto 8px;width:64px;height:64px;font-size:22px">' + esc(initials(ui.pinUser.name)) + '</div><h2>' + esc(ui.pinUser.name) + '</h2><div class="mut">Introdu PIN-ul</div>' + pinPadHtml() + '</div></div>';
   else if (ui.screen === 'main') {
     var tabs = isAdmin() ? [['azi', '👥', 'Azi'], ['rap', '📊', 'Rapoarte'], ['echipa', '🪪', 'Echipă'], ['setari', '⚙️', 'Setări'], ['pontaj', '⏱', 'Pontajul meu']] : [['pontaj', '⏱', 'Pontaj'], ['zile', '📅', 'Zilele mele']];
     var body = ui.tab === 'pontaj' ? viewPontaj() : ui.tab === 'zile' ? viewZile() : ui.tab === 'azi' ? viewAzi() : ui.tab === 'rap' ? viewRapoarte() : ui.tab === 'echipa' ? viewEchipa() : viewSetari();
-    h = '<div class="top"><div class="grow"><div class="ttl">' + esc(session.name) + '</div><div class="sub">Pontaj TC' + (isAdmin() ? ' · admin' : '') + '</div></div><button data-a="menu" aria-label="Meniu">☰</button></div>' + demoBar() +
+    h = '<div class="top"><div class="grow"><div class="ttl">' + esc(session.name) + '</div><div class="sub">' + esc(APP) + (SITES.length > 1 ? ' · ' + esc(siteName(ui.site)) : '') + (isAdmin() ? (SITES.length > 1 ? (isUniversal() ? ' · admin universal' : ' · admin depozit') : ' · admin') : '') + '</div></div>' + (isUniversal() && SITES.length > 1 ? '<button data-a="siteMenu" aria-label="Schimbă depozitul">' + esc(siteName(ui.site)) + ' ▾</button>' : '') + '<button data-a="menu" aria-label="Meniu">☰</button></div>' + demoBar() +
       '<div class="wrap' + (ui.tab === 'azi' || ui.tab === 'rap' ? ' wide' : '') + '">' + body + '</div><div class="tabbar">' + tabs.map(function (t) { return '<button class="' + (ui.tab === t[0] ? 'on' : '') + '" data-a="tab" data-t="' + t[0] + '"><span class="ic">' + t[1] + '</span>' + t[2] + '</button>'; }).join('') + '</div>';
   }
   a.innerHTML = h;
@@ -832,12 +918,18 @@ var actions = {
   pinKey: function (d) { if (busy || ui.pin.length >= 4) return; ui.pin += d.k; renderPinDots(''); if (ui.pin.length === 4) doLogin(ui.pin); },
   pinDel: function () { if (busy) return; ui.pin = ui.pin.slice(0, -1); renderPinDots(''); },
   pinBack: function () { if (busy) return; ui.pin = ''; ui.err = ''; LS.del('ptc_me'); showRoster(); },
+  pickSite: function (d) { if (!siteOk(d.s)) return; ui.site = d.s; LS.set('ptc_site', d.s); showRoster(); },
+  sitesBack: function () { ui.pin = ''; ui.err = ''; showSites(); },
+  siteMenu: function () {
+    sheet('<h2>Depozit</h2><div class="stack">' + SITES.map(function (x) { return '<button class="btn ' + (x.id === ui.site ? 'navy' : 'ghost') + '" data-a="siteSwitch" data-s="' + esc(x.id) + '">' + esc(x.name) + (x.id === ui.site ? ' ✓' : '') + '</button>'; }).join('') + '<button class="btn ghost" data-a="sheetClose">Închide</button></div>');
+  },
+  siteSwitch: function (d) { switchSite(d.s); },
   teamGo: function () { var c = $('#tc').value.trim(); if (c.length < 4) { ui.err = 'Codul are minim 4 caractere'; return render(); } showRoster(c); },
   setupGo: function (d, el) {
     var n = $('#sn').value.trim(), p = $('#sp').value.trim(), t = $('#st').value.trim(), er = $('#serr');
     if (n.length < 3) { er.textContent = 'Scrie numele'; return; } if (!validPin(p)) { er.textContent = 'PIN-ul trebuie să aibă exact 4 cifre'; return; } if (t.length < 4) { er.textContent = 'Codul echipei: minim 4 caractere'; return; }
     el.disabled = true; er.textContent = 'Se creează…';
-    store.setup({ name: n, pin: p, teamCode: t }).then(function (s) { session = s; return Promise.all([store.config(), store.roster()]); }).then(function (a) { cfg = a[0]; roster = a[1]; ui.screen = 'main'; ui.tab = 'echipa'; enterTab(); render(); toast('Gata. Adaugă acum utilizatorii.'); })
+    store.setup({ name: n, pin: p, teamCode: t }).then(function (s) { if (!ui.site) ui.site = SITE0; return enterSession(s); }).then(function () { ui.tab = 'echipa'; enterTab(); render(); toast('Gata. Adaugă acum utilizatorii.'); })
       .catch(function (e) { console.error(e); el.disabled = false; er.textContent = 'Nu a mers: ' + emsg(e); });
   },
   tab: function (d) { ui.tab = d.t; enterTab(); render(); window.scrollTo(0, 0); },
@@ -874,6 +966,7 @@ var actions = {
     store.saveDay(ed.id, doc, session.name).then(function () { sheet(null); toast('Pontaj corectat'); if (ui.tab === 'rap' && ui.rep) runReport(); }).catch(function (e) { el.disabled = false; er.textContent = emsg(e); });
   },
   repRun: function () { ui.repFrom = $('#rf').value; ui.repTo = $('#rt').value; ui.repUser = $('#ru').value; runReport(); },
+  repForce: function () { runReport(true); },
   repAll: function () { ui.repUser = ''; render(); window.scrollTo(0, 0); },
   repPick: function (d) { ui.repUser = d.u; render(); window.scrollTo(0, 0); },
   repNewDay: function () { var v = $('#rnew').value; if (v) openDay(ui.repUser, v); },
@@ -881,11 +974,15 @@ var actions = {
   userNew: function () { userSheet(''); },
   userEdit: function (d) { userSheet(d.u); },
   userSave: function (d, el) {
-    var id = ui.userEdit, n = $('#un').value.trim(), r = $('#ur').value, w = $('#uw').value.trim(), er = $('#uerr'), p;
+    var id = ui.userEdit, n = $('#un').value.trim(), w = $('#uw').value.trim(), er = $('#uerr'), p, self = id && id === session.userId;
+    var rr = $('#ur') ? $('#ur').value : 'operator', st = $('#us') ? $('#us').value : ui.site;
+    // operator: ține de depozitul ales · admin depozit: rol admin limitat la depozit (scope) · admin universal: fără limită
+    var data = { name: n, wmsId: w };
+    if (!self && (isUniversal() || !id)) { data.role = rr === 'operator' ? 'operator' : 'admin'; data.scope = rr === 'siteadmin' ? st : ''; data.site = st; }
     if (n.length < 3) { er.textContent = 'Scrie numele'; return; }
     if (!id) { p = $('#up').value.trim(); if (!validPin(p)) { er.textContent = 'PIN-ul trebuie să aibă exact 4 cifre'; return; } }
     el.disabled = true; er.textContent = 'Se salvează…';
-    (id ? store.updateUser(id, { name: n, role: r, wmsId: w }) : store.addUser({ name: n, role: r, wmsId: w, pin: p })).then(function () { return store.roster(); }).then(function (ro) { roster = ro; if (id === session.userId) session.name = n; sheet(null); render(); toast(id ? 'Salvat' : 'Utilizator creat'); })
+    (id ? store.updateUser(id, data) : store.addUser(Object.assign(data, { pin: p }))).then(function () { return store.roster(); }).then(function (ro) { roster = ro; if (id === session.userId) session.name = n; sheet(null); render(); toast(id ? 'Salvat' : 'Utilizator creat'); })
       .catch(function (e) { console.error(e); el.disabled = false; er.textContent = 'Nu a mers: ' + emsg(e); });
   },
   userPin: function (d, el) {
@@ -895,14 +992,14 @@ var actions = {
   normSave: function () {
     var hh = parseInt($('#snh').value, 10), mm = parseInt($('#snm').value, 10);
     if (isNaN(hh) || isNaN(mm) || hh < 0 || hh > 16 || mm < 0 || mm > 59 || hh * 60 + mm < 1) return toast('Durată invalidă');
-    cfg.normMin = hh * 60 + mm; store.saveConfig(cfg).then(function () { toast('Durată salvată: ' + hh + ' ore ' + mm + ' min'); ui.rep = null; render(); }).catch(function (e) { toast(emsg(e)); });
+    cfg.normMin = hh * 60 + mm; store.saveConfig(ui.site, cfg).then(function () { toast('Durată salvată: ' + hh + ' ore ' + mm + ' min'); ui.rep = null; render(); }).catch(function (e) { toast(emsg(e)); });
   },
   reasonEdit: function (d) { reasonSheet(+d.i); },
   reasonSave: function () {
     var i = ui.reasonEdit, n = $('#qn').value.trim(); if (n.length < 2) { $('#qerr').textContent = 'Scrie denumirea'; return; }
     var r = i >= 0 ? cfg.reasons[i] : { id: 'r_' + rid(6) }; r.name = n; r.kind = $('#qk').value; r.comment = $('#qc').value; r.active = $('#qa').value === '1';
     if (i < 0) cfg.reasons.push(r);
-    store.saveConfig(cfg).then(function () { sheet(null); render(); toast('Salvat'); }).catch(function (e) { $('#qerr').textContent = emsg(e); });
+    store.saveConfig(ui.site, cfg).then(function () { sheet(null); render(); toast('Salvat'); }).catch(function (e) { $('#qerr').textContent = emsg(e); });
   },
   teamSave: function (d, el) { var c = $('#steam').value.trim(); if (c.length < 4) return toast('Minim 4 caractere'); el.disabled = true; store.setTeamCode(c).then(function () { toast('Cod schimbat'); render(); }).catch(function (e) { console.error(e); el.disabled = false; toast('Nu a mers: ' + emsg(e)); }); }
 };
@@ -924,10 +1021,15 @@ document.addEventListener('input', function (ev) {   // câmpurile editorului de
 document.addEventListener('change', function (ev) { var el = ev.target; if (el.dataset && el.dataset.ei != null && ui.edit) { var r = ui.edit.rows[+el.dataset.ei]; if (r) r[el.dataset.ef] = el.type === 'checkbox' ? el.checked : el.value; } });
 document.addEventListener('visibilitychange', function () {
   if (document.hidden || !session) return;
-  if (ui.screen === 'main') { render(); store.syncClock().then(function (o) { clockOffset = o; LS.set('ptc_offset', o); }).catch(function () {}); }
+  if (ui.screen !== 'main') return;
+  render();
+  if (Date.now() - lastClockSync > 30 * 60000) {   // ceasul se resincronizează cel mult o dată la 30 de minute (economie la limita gratuită)
+    lastClockSync = Date.now(); store.syncClock().then(function (o) { clockOffset = o; LS.set('ptc_offset', o); }).catch(function () {});
+  }
 });
 
 window.__ptc = { computeDay: computeDay, zonedToMs: zonedToMs, dateKey: dateKey, fmtDur: fmtDur, addDays: addDays, overtime: overtime };
+document.title = APP; (function () { var m = document.querySelector('meta[name="apple-mobile-web-app-title"]'); if (m) m.setAttribute('content', APP); })();
 tickTimer = setInterval(tick, 1000);
 if ('serviceWorker' in navigator && location.protocol === 'https:') { try { navigator.serviceWorker.register('sw.js').catch(function () {}); } catch (e) {} }
 start();
