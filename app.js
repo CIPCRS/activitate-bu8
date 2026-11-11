@@ -5,7 +5,7 @@
 /* ───────────── utilitare ───────────── */
 var TZ = 'Europe/Bucharest';
 var MAX_SHIFT_MS = 16 * 3600e3;          // o tură deschisă mai veche de 16h = "plecare lipsă"
-var APP_VERSION = '1.0.0';
+var APP_VERSION = '1.0.1';
 var $ = function (s, r) { return (r || document).querySelector(s); };
 var mem = {};
 var LS = {
@@ -726,8 +726,10 @@ function userSheet(id) {
 
 /* ───────────── admin: setări ───────────── */
 function viewSetari() {
-  var nm = cfg.normMin || 510, hh = String(Math.floor(nm / 60)).padStart(2, '0') + ':' + String(nm % 60).padStart(2, '0');
-  var h = '<div class="card"><h3>Ore suplimentare</h3><label class="f">Norma zilnică de prezență (sosire → plecare). Ce trece peste se calculează ca ore suplimentare.</label><div class="row"><input class="in grow" type="time" id="snorm" value="' + hh + '"><button class="btn navy sm" data-a="normSave">Salvează</button></div></div>';
+  var nm = cfg.normMin || 510;
+  var h = '<div class="card"><h3>Ore suplimentare</h3><label class="f">Durata normală a unei zile (timpul contorizat de la sosire la plecare). Tot ce depășește această durată se calculează ca ore suplimentare.</label>' +
+    '<div class="row"><input class="in" type="number" inputmode="numeric" id="snh" min="0" max="16" value="' + Math.floor(nm / 60) + '" style="width:76px"><span>ore</span><input class="in" type="number" inputmode="numeric" id="snm" min="0" max="59" value="' + (nm % 60) + '" style="width:76px"><span class="grow">minute</span><button class="btn navy sm" data-a="normSave">Salvează</button></div>' +
+    '<div class="small mut" style="margin-top:6px">Exemplu: la ' + Math.floor(nm / 60) + ' ore ' + (nm % 60) + ' min, cine stă ' + fmtDur((nm + 45) * 60000) + ' are 0:45 ore suplimentare.</div></div>';
   h += '<div class="card"><h3>Activități / motive de pauză la picking</h3>' + (cfg.reasons || []).map(function (r, i) {
     return '<button class="ucard" style="box-shadow:none;border:1px solid var(--line)' + (r.active === false ? ';opacity:.55' : '') + '" data-a="reasonEdit" data-i="' + i + '"><span class="dot ' + r.kind + '" style="margin:0"></span><span><span class="nm">' + esc(r.name) + '</span><br><span class="small mut">' + KIND_LBL[r.kind] + ' · ' + CMT_LBL[r.comment || 'none'] + (r.active === false ? ' · ascuns' : '') + '</span></span><span class="rt mut">›</span></button>';
   }).join('') + '<button class="btn ghost" data-a="reasonEdit" data-i="-1">+ Activitate nouă</button></div>';
@@ -858,7 +860,11 @@ var actions = {
     var p = $('#unp').value.trim(), er = $('#uerr'); if (!validPin(p)) { er.textContent = 'PIN-ul trebuie să aibă exact 4 cifre'; return; }
     el.disabled = true; store.resetPin(ui.userEdit, p).then(function () { return store.roster(); }).then(function (ro) { roster = ro; sheet(null); toast('PIN resetat'); }).catch(function (e) { console.error(e); el.disabled = false; er.textContent = 'Nu a mers: ' + emsg(e); });
   },
-  normSave: function () { var v = $('#snorm').value.split(':').map(Number); if (v.length < 2 || isNaN(v[0])) return toast('Oră invalidă'); cfg.normMin = v[0] * 60 + v[1]; store.saveConfig(cfg).then(function () { toast('Normă salvată'); ui.rep = null; }).catch(function (e) { toast(emsg(e)); }); },
+  normSave: function () {
+    var hh = parseInt($('#snh').value, 10), mm = parseInt($('#snm').value, 10);
+    if (isNaN(hh) || isNaN(mm) || hh < 0 || hh > 16 || mm < 0 || mm > 59 || hh * 60 + mm < 1) return toast('Durată invalidă');
+    cfg.normMin = hh * 60 + mm; store.saveConfig(cfg).then(function () { toast('Durată salvată: ' + hh + ' ore ' + mm + ' min'); ui.rep = null; render(); }).catch(function (e) { toast(emsg(e)); });
+  },
   reasonEdit: function (d) { reasonSheet(+d.i); },
   reasonSave: function () {
     var i = ui.reasonEdit, n = $('#qn').value.trim(); if (n.length < 2) { $('#qerr').textContent = 'Scrie denumirea'; return; }

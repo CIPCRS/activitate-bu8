@@ -1,6 +1,6 @@
 // Service worker: aplicația se deschide și fără semnal (fișierele rămân pe telefon).
 // La fiecare versiune nouă urcată pe GitHub, schimbă numărul de mai jos.
-const CACHE = 'pontaj-tc-v1.0.0';
+const CACHE = 'pontaj-tc-v1.0.1';
 const SHELL = ['./', 'index.html', 'app.js', 'config.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png',
   'vendor/firebase-app-compat.js', 'vendor/firebase-auth-compat.js', 'vendor/firebase-firestore-compat.js', 'vendor/xlsx.mini.min.js'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });

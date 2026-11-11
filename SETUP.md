@@ -49,7 +49,7 @@ window.FIREBASE_CONFIG = {
 1. Deschide adresa. Apare **„Configurare inițială”**: numele tău, PIN admin (4 cifre) și **codul echipei** (minim 4 caractere).
    Primul care completează ecranul acesta devine admin — fă-o imediat după publicare.
 2. **Echipă → + Utilizator nou**: nume, PIN de 4 cifre, opțional ID-ul de user din WMS (apare în exportul Excel, foaia „Ore picking”).
-3. **Setări**: norma zilnică (implicit 08:30 prezență) și lista de activități / motive de pauză.
+3. **Setări**: durata normală a zilei (implicit 8 ore 30 min de prezență) și lista de activități / motive de pauză.
 
 ## 5. Pe telefoanele oamenilor
 
